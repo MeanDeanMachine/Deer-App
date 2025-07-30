@@ -111,8 +111,14 @@ class RoboflowClient:
     # -----------------------------------------------------------------
     # INTERNAL HELPERS
     # -----------------------------------------------------------------
-    @staticmethod
-    def _parse_response(data: Dict) -> Tuple[bytes, Dict[str, int]]:
+import logging, json
+
+@staticmethod
+def _parse_response(data: Dict) -> Tuple[bytes, Dict[str, int]]:
+    # ➜ DEBUG: print first payload once per session
+    if not hasattr(_parse_response, "_seen"):
+        logging.info("RAW ROBOFLOW RESPONSE:\n%s", json.dumps(data, indent=2)[:2000])
+        _parse_response._seen = True
         """
         Extract counts and annotated image bytes from the workflow response.
 
