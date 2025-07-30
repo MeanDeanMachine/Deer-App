@@ -232,7 +232,7 @@ st.set_page_config(page_title="DeerLens", layout="wide")
 st.title("🦌 DeerLens – Deer Detection and Analysis")
 st.markdown(
     """
-    Upload between **50 and 900** JPEG images captured from your trail camera and
+    Upload between **1 and 900** JPEG images captured from your trail camera and
     let DeerLens automatically identify deer and compute summary statistics.
     All processing runs locally in this session and no images are stored
     permanently.
@@ -253,9 +253,9 @@ error_placeholder = st.empty()
 
 if uploaded_files:
     num_files = len(uploaded_files)
-    if num_files < 50:
+    if num_files < 1:
         st.warning(
-            f"Please select at least 50 images. You have selected {num_files} file(s)."
+            f"Please select at least 1 image. You have selected {num_files} file(s)."
         )
     elif num_files > 900:
         st.warning(
