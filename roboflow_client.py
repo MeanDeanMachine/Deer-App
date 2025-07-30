@@ -1,40 +1,34 @@
 """
-Asynchronous client for interacting with a **Roboflow *workflow***
-deployed on the Serverless Inference endpoint.
+Roboflow workflow client (Serverless endpoint).
 
-Unlike the older `detect.roboflow.com/<project>/<version>` URLs (which
-expect multipart form-data), *workflow* endpoints live at
+Works with URLs like:
+https://serverless.roboflow.com/infer/workflows/<workflow-slug>/<block-name>
 
-    https://serverless.roboflow.com/infer/workflows/<workflow-slug>/<block-name>
+It sends a JSON payload:
 
-and expect a **JSON** payload that includes your API key plus the image
-encoded as base-64.
+    {
+        "api_key": "...",
+        "inputs": {
+            "image": { "type": "base64", "value": "<b64>" }
+        }
+    }
 
-Environment variables
----------------------
-ROBOFLOW_API_KEY
-    Your Roboflow API key.
-
-ROBOFLOW_WORKFLOW_URL   (preferred)
-    The *full* workflow URL, e.g.
-    https://serverless.roboflow.com/infer/workflows/deer-appv1/detect-count-and-visualize-2
-
-If ROBOFLOW_WORKFLOW_URL is **unset**, the constructor falls back to a
-hard-coded default.  Edit `DEFAULT_WORKFLOW_URL` to match your workflow.
+and returns (annotated_image_bytes, counts_dict).
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
 # --------------------------------------------------------------------
-# Adjust this to *your* workflow URL if you don’t want to rely on an
-# environment variable:
+# Set a default so the file works even if no env var is present.
+# Replace with *your* workflow slug if you prefer.
 DEFAULT_WORKFLOW_URL = (
     "https://serverless.roboflow.com/infer/workflows/"
     "deer-appv1/detect-count-and-visualize-2"
@@ -43,7 +37,7 @@ DEFAULT_WORKFLOW_URL = (
 
 
 class RoboflowClient:
-    """Client for invoking a Roboflow *workflow* asynchronously."""
+    """Async client for a Roboflow *workflow*."""
 
     def __init__(
         self,
@@ -61,35 +55,17 @@ class RoboflowClient:
         if not self.workflow_url:
             raise ValueError("Workflow URL is not set.")
 
-    # -----------------------------------------------------------------
-    # PUBLIC API
-    # -----------------------------------------------------------------
+        # Log once so we know the correct URL is in use
+        logging.info("Roboflow workflow URL: %s", self.workflow_url)
+
+    # ------------------------------------------------------------------
     async def process_image(
         self,
         session: aiohttp.ClientSession,
         image_bytes: bytes,
         filename: str = "image.jpg",
     ) -> Tuple[bytes, Dict[str, int]]:
-        """
-        Send one image to the Roboflow workflow and return:
-
-        1. The annotated image (bytes) – if the workflow returns it.
-        2. A dict with counts for 'buck', 'deer', 'doe'.
-
-        Parameters
-        ----------
-        session : aiohttp.ClientSession
-            Shared session for HTTP requests.
-        image_bytes : bytes
-            Raw JPEG bytes.
-        filename : str, optional
-            Ignored by the workflow but useful for debugging.
-
-        Raises
-        ------
-        aiohttp.ClientResponseError
-            Propagated if the request fails (e.g. 401, 413, 5xx).
-        """
+        """Send one image → get (annotated_bytes, counts)."""
         payload = {
             "api_key": self.api_key,
             "inputs": {
@@ -108,38 +84,32 @@ class RoboflowClient:
             data = await resp.json()
             return self._parse_response(data)
 
-    # -----------------------------------------------------------------
-    # INTERNAL HELPERS
-    # -----------------------------------------------------------------
-import logging, json
-
-@staticmethod
-def _parse_response(data: Dict) -> Tuple[bytes, Dict[str, int]]:
-    # ➜ DEBUG: print first payload once per session
-    if not hasattr(_parse_response, "_seen"):
-        logging.info("RAW ROBOFLOW RESPONSE:\n%s", json.dumps(data, indent=2)[:2000])
-        _parse_response._seen = True
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_response(data: Dict) -> Tuple[bytes, Dict[str, int]]:
         """
-        Extract counts and annotated image bytes from the workflow response.
+        Extract counts + annotated image from the workflow response.
 
-        This works if your blocks output either:
-        • `predictions` (list of dicts with 'class')
-        • `counts` (dict with numeric counts)
-        • `image` / `annotated_image` / `media` (base64 image string)
-
-        Adjust as needed for your custom schema.
+        DEBUG: prints the first payload (truncate to 2 000 chars) to logs so
+        we can see the exact schema and adjust if needed.
         """
-        # --- count classes ---------------------------------------------------
+        if not hasattr(RoboflowClient._parse_response, "_seen"):
+            logging.info(
+                "RAW ROBOFLOW RESPONSE:\n%s",
+                json.dumps(data, indent=2)[:2000],
+            )
+            RoboflowClient._parse_response._seen = True
+
+        # --------- count classes -------------------------------------------
         counts: Dict[str, int] = {"buck": 0, "deer": 0, "doe": 0}
 
-        # Case 1: counts provided directly
+        # Case 1: explicit "counts" object
         if isinstance(data.get("counts"), dict):
-            direct = data["counts"]
             for cls in counts:
-                if isinstance(direct.get(cls), int):
-                    counts[cls] = int(direct[cls])
+                if isinstance(data["counts"].get(cls), int):
+                    counts[cls] = int(data["counts"][cls])
 
-        # Case 2: tally predictions list
+        # Case 2: iterate over "predictions" list
         if not any(counts.values()):
             preds: List[Dict] = data.get("predictions") or data.get("results", [])
             for pred in preds:
@@ -147,13 +117,16 @@ def _parse_response(data: Dict) -> Tuple[bytes, Dict[str, int]]:
                 if cls in counts:
                     counts[cls] += 1
 
-        # --- annotated image -------------------------------------------------
+        # --------- annotated image -----------------------------------------
         annotated_b64: Optional[str] = (
-            data.get("image") or data.get("annotated_image") or data.get("media")
+            data.get("image")
+            or data.get("annotated_image")
+            or data.get("media")
+            or data.get("visualization")
         )
         annotated_bytes: bytes = b""
         if isinstance(annotated_b64, str) and annotated_b64:
-            if "," in annotated_b64:  # strip data URI header
+            if "," in annotated_b64:  # strip data URI prefix if present
                 annotated_b64 = annotated_b64.split(",", 1)[1]
             try:
                 annotated_bytes = base64.b64decode(annotated_b64)
