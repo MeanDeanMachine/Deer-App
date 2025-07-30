@@ -1,19 +1,21 @@
 """
-Roboflow workflow client (Serverless endpoint).
+Roboflow *workflow* client for Streamlit DeerLens
+-------------------------------------------------
 
-Works with URLs like:
-https://serverless.roboflow.com/infer/workflows/<workflow-slug>/<block-name>
+• Works with **Serverless** workflow URLs
+  https://serverless.roboflow.com/infer/workflows/<workflow-slug>/<block-name>
 
-It sends a JSON payload:
+• Sends JSON with the image as **base-64**.
 
-    {
-        "api_key": "...",
-        "inputs": {
-            "image": { "type": "base64", "value": "<b64>" }
-        }
-    }
+• Automatically extracts class counts (`buck`, `deer`, `doe`) and an
+  annotated image regardless of whether they live at top level *or*
+  nested inside `results` → <block>.
 
-and returns (annotated_image_bytes, counts_dict).
+Environment variables
+~~~~~~~~~~~~~~~~~~~~~
+ROBOFLOW_API_KEY          – required.
+ROBOFLOW_WORKFLOW_URL     – full workflow URL (preferred).
+If the latter is absent we fall back to DEFAULT_WORKFLOW_URL below.
 """
 
 from __future__ import annotations
@@ -26,18 +28,20 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
-# --------------------------------------------------------------------
-# Set a default so the file works even if no env var is present.
-# Replace with *your* workflow slug if you prefer.
+##############################################################################
+# Edit this constant if you don’t want to set ROBOFLOW_WORKFLOW_URL.
+##############################################################################
 DEFAULT_WORKFLOW_URL = (
     "https://serverless.roboflow.com/infer/workflows/"
     "deer-appv1/detect-count-and-visualize-2"
 )
-# --------------------------------------------------------------------
+##############################################################################
 
 
 class RoboflowClient:
-    """Async client for a Roboflow *workflow*."""
+    """Async helper to call a Roboflow *workflow*."""
+
+    CLASSES = ("buck", "deer", "doe")  # canonical order / names
 
     def __init__(
         self,
@@ -51,21 +55,21 @@ class RoboflowClient:
             or DEFAULT_WORKFLOW_URL
         )
         if not self.api_key:
-            raise ValueError("ROBOFLOW_API_KEY environment variable is not set.")
+            raise ValueError("ROBOFLOW_API_KEY is not set")
         if not self.workflow_url:
-            raise ValueError("Workflow URL is not set.")
+            raise ValueError("Workflow URL is not set")
 
-        # Log once so we know the correct URL is in use
-        logging.info("Roboflow workflow URL: %s", self.workflow_url)
+        # Visible in Streamlit Cloud logs, so we know the right code is running
+        print(f"RoboflowClient using URL: {self.workflow_url}")
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------------- #
     async def process_image(
         self,
         session: aiohttp.ClientSession,
         image_bytes: bytes,
         filename: str = "image.jpg",
     ) -> Tuple[bytes, Dict[str, int]]:
-        """Send one image → get (annotated_bytes, counts)."""
+        """Return (annotated_bytes, counts) for one image."""
         payload = {
             "api_key": self.api_key,
             "inputs": {
@@ -84,49 +88,62 @@ class RoboflowClient:
             data = await resp.json()
             return self._parse_response(data)
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------------- #
     @staticmethod
     def _parse_response(data: Dict) -> Tuple[bytes, Dict[str, int]]:
-        """
-        Extract counts + annotated image from the workflow response.
-
-        DEBUG: prints the first payload (truncate to 2 000 chars) to logs so
-        we can see the exact schema and adjust if needed.
-        """
+        """Robustly pull counts + annotated image from arbitrary schema."""
+        # DEBUG – print only once per app start
         if not hasattr(RoboflowClient._parse_response, "_seen"):
-            logging.info(
-                "RAW ROBOFLOW RESPONSE:\n%s",
-                json.dumps(data, indent=2)[:2000],
-            )
+            print("▼▼▼ RAW ROBOFLOW RESPONSE ▼▼▼")
+            print(json.dumps(data, indent=2)[:4000])
+            print("▲▲▲ END RAW RESPONSE ▲▲▲")
             RoboflowClient._parse_response._seen = True
 
-        # --------- count classes -------------------------------------------
-        counts: Dict[str, int] = {"buck": 0, "deer": 0, "doe": 0}
+        # ---- counts -------------------------------------------------------
+        counts: Dict[str, int] = {k: 0 for k in RoboflowClient.CLASSES}
 
-        # Case 1: explicit "counts" object
-        if isinstance(data.get("counts"), dict):
-            for cls in counts:
-                if isinstance(data["counts"].get(cls), int):
-                    counts[cls] = int(data["counts"][cls])
+        def _accumulate(obj: Dict) -> None:
+            """Add counts from a nested dict if present."""
+            if not isinstance(obj, dict):
+                return
+            if "counts" in obj and isinstance(obj["counts"], dict):
+                for cls in RoboflowClient.CLASSES:
+                    if isinstance(obj["counts"].get(cls), (int, float)):
+                        counts[cls] += int(obj["counts"][cls])
+            if "predictions" in obj and isinstance(obj["predictions"], list):
+                for pred in obj["predictions"]:
+                    cls = (pred.get("class") or pred.get("label") or "").lower()
+                    if cls in counts:
+                        counts[cls] += 1
 
-        # Case 2: iterate over "predictions" list
-        if not any(counts.values()):
-            preds: List[Dict] = data.get("predictions") or data.get("results", [])
-            for pred in preds:
-                cls = (pred.get("class") or pred.get("label") or "").lower()
-                if cls in counts:
-                    counts[cls] += 1
+        # top-level first
+        _accumulate(data)
 
-        # --------- annotated image -----------------------------------------
-        annotated_b64: Optional[str] = (
-            data.get("image")
-            or data.get("annotated_image")
-            or data.get("media")
-            or data.get("visualization")
-        )
+        # look one level under 'results'
+        if "results" in data and isinstance(data["results"], dict):
+            for block in data["results"].values():
+                _accumulate(block)
+
+        # ---- annotated image ---------------------------------------------
+        annotated_b64: Optional[str] = None
+
+        def _maybe_set_image(obj: Dict) -> None:
+            nonlocal annotated_b64
+            if annotated_b64 is not None:
+                return
+            for key in ("image", "annotated_image", "media", "visualization"):
+                if isinstance(obj.get(key), str):
+                    annotated_b64 = obj[key]
+                    return
+
+        _maybe_set_image(data)
+        if "results" in data and isinstance(data["results"], dict):
+            for block in data["results"].values():
+                _maybe_set_image(block)
+
         annotated_bytes: bytes = b""
-        if isinstance(annotated_b64, str) and annotated_b64:
-            if "," in annotated_b64:  # strip data URI prefix if present
+        if isinstance(annotated_b64, str):
+            if "," in annotated_b64:  # strip data URI scheme
                 annotated_b64 = annotated_b64.split(",", 1)[1]
             try:
                 annotated_bytes = base64.b64decode(annotated_b64)
