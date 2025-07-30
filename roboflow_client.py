@@ -1,21 +1,17 @@
 """
-Roboflow *workflow* client for Streamlit DeerLens
--------------------------------------------------
+Async client for both Roboflow Serverless *workflows* **and** the older
+`detect.roboflow.com` upload endpoint.
 
-• Works with **Serverless** workflow URLs
-  https://serverless.roboflow.com/infer/workflows/<workflow-slug>/<block-name>
+★ Usage -----------------------------------------------------------------
+from roboflow_client import RoboflowClient
+client = RoboflowClient()                         # picks up env vars
+annot_jpg, counts = await client.process_image(session, jpeg_bytes)
 
-• Sends JSON with the image as **base-64**.
-
-• Automatically extracts class counts (`buck`, `deer`, `doe`) and an
-  annotated image regardless of whether they live at top level *or*
-  nested inside `results` → <block>.
-
-Environment variables
-~~~~~~~~~~~~~~~~~~~~~
-ROBOFLOW_API_KEY          – required.
-ROBOFLOW_WORKFLOW_URL     – full workflow URL (preferred).
-If the latter is absent we fall back to DEFAULT_WORKFLOW_URL below.
+Env vars ---------------------------------------------------------------
+ROBOFLOW_API_KEY          (required)
+ROBOFLOW_WORKFLOW_URL     e.g.
+  https://serverless.roboflow.com/infer/workflows/deer-appv1/detect-count-and-visualize-2
+  – if omitted we will try legacy mode instead.
 """
 
 from __future__ import annotations
@@ -28,126 +24,168 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
-##############################################################################
-# Edit this constant if you don’t want to set ROBOFLOW_WORKFLOW_URL.
-##############################################################################
+# ----------------------------------------------------------------------
+# Configuration helpers
+# ----------------------------------------------------------------------
+
+LEGACY_TEMPLATE = "https://detect.roboflow.com/{project_ver}?api_key={api_key}"
 DEFAULT_WORKFLOW_URL = (
     "https://serverless.roboflow.com/infer/workflows/"
     "deer-appv1/detect-count-and-visualize-2"
 )
-##############################################################################
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 
 
 class RoboflowClient:
-    """Async helper to call a Roboflow *workflow*."""
-
-    CLASSES = ("buck", "deer", "doe")  # canonical order / names
+    """Asynchronous helper for Roboflow inference."""
 
     def __init__(
         self,
+        *,
         api_key: Optional[str] = None,
         workflow_url: Optional[str] = None,
+        legacy_project_ver: Optional[str] = None,
     ) -> None:
-        self.api_key: str = api_key or os.getenv("ROBOFLOW_API_KEY", "")
-        self.workflow_url: str = (
+        self.api_key = api_key or os.getenv("ROBOFLOW_API_KEY")
+        if not self.api_key:
+            raise ValueError("ROBOFLOW_API_KEY must be set in environment")
+
+        self.workflow_url = (
             workflow_url
             or os.getenv("ROBOFLOW_WORKFLOW_URL")
             or DEFAULT_WORKFLOW_URL
+        ).rstrip("/")
+
+        # For the *old* endpoint you still need <project>/<version>
+        self.legacy_project_ver = (
+            legacy_project_ver or os.getenv("ROBOFLOW_PROJECT_VER")
         )
-        if not self.api_key:
-            raise ValueError("ROBOFLOW_API_KEY is not set")
-        if not self.workflow_url:
-            raise ValueError("Workflow URL is not set")
 
-        # Visible in Streamlit Cloud logs, so we know the right code is running
-        print(f"RoboflowClient using URL: {self.workflow_url}")
+        # Decide which mode we are in
+        self._use_workflow = "serverless.roboflow.com" in self.workflow_url
 
-    # --------------------------------------------------------------------- #
+        logger.info(
+            "RoboflowClient initialised – mode=%s, url=%s",
+            "workflow" if self._use_workflow else "legacy",
+            self.workflow_url if self._use_workflow else LEGACY_TEMPLATE.format(
+                project_ver=self.legacy_project_ver or "<unset>…", api_key="***"
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Public method
+    # ------------------------------------------------------------------
     async def process_image(
         self,
         session: aiohttp.ClientSession,
         image_bytes: bytes,
         filename: str = "image.jpg",
     ) -> Tuple[bytes, Dict[str, int]]:
-        """Return (annotated_bytes, counts) for one image."""
+        """
+        Execute one inference request.
+
+        Returns
+        -------
+        (annotated_bytes, counts)
+        """
+        if self._use_workflow:
+            return await self._call_workflow(session, image_bytes)
+        # fallback – legacy detect.roboflow.com
+        return await self._call_legacy(session, image_bytes, filename)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    async def _call_workflow(
+        self, session: aiohttp.ClientSession, img: bytes
+    ) -> Tuple[bytes, Dict[str, int]]:
         payload = {
             "api_key": self.api_key,
             "inputs": {
                 "image": {
                     "type": "base64",
-                    "value": base64.b64encode(image_bytes).decode("ascii"),
+                    "value": base64.b64encode(img).decode("ascii"),
                 }
             },
         }
         headers = {"Content-Type": "application/json"}
-
         async with session.post(
             self.workflow_url, headers=headers, data=json.dumps(payload)
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+        ) as r:
+            r.raise_for_status()
+            data = await r.json()
             return self._parse_response(data)
 
-    # --------------------------------------------------------------------- #
+    async def _call_legacy(
+        self,
+        session: aiohttp.ClientSession,
+        img: bytes,
+        filename: str,
+    ) -> Tuple[bytes, Dict[str, int]]:
+        if not self.legacy_project_ver:
+            raise ValueError(
+                "ROBOFLOW_PROJECT_VER (project/version) must be set for legacy mode"
+            )
+        url = LEGACY_TEMPLATE.format(
+            project_ver=self.legacy_project_ver, api_key=self.api_key
+        )
+        form = aiohttp.FormData()
+        form.add_field(
+            "file",
+            img,
+            filename=filename,
+            content_type="image/jpeg",
+        )
+        async with session.post(url, data=form) as r:
+            r.raise_for_status()
+            data = await r.json()
+            return self._parse_response(data)
+
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
     @staticmethod
     def _parse_response(data: Dict) -> Tuple[bytes, Dict[str, int]]:
-        """Robustly pull counts + annotated image from arbitrary schema."""
-        # DEBUG – print only once per app start
-        if not hasattr(RoboflowClient._parse_response, "_seen"):
-            print("▼▼▼ RAW ROBOFLOW RESPONSE ▼▼▼")
-            print(json.dumps(data, indent=2)[:4000])
-            print("▲▲▲ END RAW RESPONSE ▲▲▲")
-            RoboflowClient._parse_response._seen = True
+        # Dump **once** per session for debugging
+        if not getattr(RoboflowClient, "_dumped", False):
+            logger.info("RAW ROBOFLOW RESPONSE (truncated):\n%s",
+                        json.dumps(data)[:1500])
+            RoboflowClient._dumped = True
 
-        # ---- counts -------------------------------------------------------
-        counts: Dict[str, int] = {k: 0 for k in RoboflowClient.CLASSES}
+        counts: Dict[str, int] = {"buck": 0, "deer": 0, "doe": 0}
 
-        def _accumulate(obj: Dict) -> None:
-            """Add counts from a nested dict if present."""
-            if not isinstance(obj, dict):
-                return
-            if "counts" in obj and isinstance(obj["counts"], dict):
-                for cls in RoboflowClient.CLASSES:
-                    if isinstance(obj["counts"].get(cls), (int, float)):
-                        counts[cls] += int(obj["counts"][cls])
-            if "predictions" in obj and isinstance(obj["predictions"], list):
-                for pred in obj["predictions"]:
-                    cls = (pred.get("class") or pred.get("label") or "").lower()
-                    if cls in counts:
-                        counts[cls] += 1
+        # 1️⃣ direct counts
+        if isinstance(data.get("counts"), dict):
+            for k in counts:
+                counts[k] = int(data["counts"].get(k, 0))
 
-        # top-level first
-        _accumulate(data)
+        # 2️⃣ flattened predictions
+        if not any(counts.values()):
+            preds: List[Dict] = (
+                data.get("predictions")
+                or data.get("results")
+                or data.get("outputs", {}).get("detections", [])
+            )
+            for p in preds or []:
+                cls = (p.get("class") or p.get("label") or "").lower()
+                if cls in counts:
+                    counts[cls] += 1
 
-        # look one level under 'results'
-        if "results" in data and isinstance(data["results"], dict):
-            for block in data["results"].values():
-                _accumulate(block)
-
-        # ---- annotated image ---------------------------------------------
-        annotated_b64: Optional[str] = None
-
-        def _maybe_set_image(obj: Dict) -> None:
-            nonlocal annotated_b64
-            if annotated_b64 is not None:
-                return
-            for key in ("image", "annotated_image", "media", "visualization"):
-                if isinstance(obj.get(key), str):
-                    annotated_b64 = obj[key]
-                    return
-
-        _maybe_set_image(data)
-        if "results" in data and isinstance(data["results"], dict):
-            for block in data["results"].values():
-                _maybe_set_image(block)
-
-        annotated_bytes: bytes = b""
-        if isinstance(annotated_b64, str):
-            if "," in annotated_b64:  # strip data URI scheme
+        # 3️⃣ annotated image (optional)
+        annotated_b64: Optional[str] = (
+            data.get("image")
+            or data.get("annotated_image")
+            or data.get("media")
+        )
+        annot_bytes = b""
+        if annotated_b64:
+            if "," in annotated_b64:  # strip data URI prefix
                 annotated_b64 = annotated_b64.split(",", 1)[1]
             try:
-                annotated_bytes = base64.b64decode(annotated_b64)
+                annot_bytes = base64.b64decode(annotated_b64)
             except Exception:
-                annotated_bytes = b""
+                pass
 
-        return annotated_bytes, counts
+        return annot_bytes, counts
