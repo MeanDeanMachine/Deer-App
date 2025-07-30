@@ -1,0 +1,6 @@
+streamlit
+pandas
+aiohttp
+plotly
+exifread
+python-dotenv
