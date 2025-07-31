@@ -23,6 +23,9 @@ import plotly.graph_objects as go
 from plotly.colors import sequential
 import streamlit as st
 
+from io import BytesIO
+from PIL import Image          # thumbnail creation
+
 from exif_utils import extract_datetime_original
 from roboflow_client import RoboflowClient
 
