@@ -1,27 +1,13 @@
 """
-Roboflow workflow client for DeerLens (Streamlit).
+Roboflow workflow client for DeerLens (Streamlit)
 
-Supports **two** modes automatically:
-
-1.  📦  *Serverless Workflow*  
-    https://serverless.roboflow.com/infer/workflows/<workflow>/<block>
-
-2.  🏷  *Legacy hosted model*  
-    https://detect.roboflow.com/<project>/<version>
-
-The client decides which to use from the URL.  It needs **no batch
-limits**—one image at a time is fine (the 50-image guard lives in
-`app.py`, not here).
-
-Environment variables
-~~~~~~~~~~~~~~~~~~~~~
-ROBOFLOW_API_KEY          – required.
-ROBOFLOW_WORKFLOW_URL     – full Serverless URL (preferred).
-ROBOFLOW_PROJECT_VER      – <project>/<version> *only* if you still use
-                            the legacy endpoint.
-
-If ROBOFLOW_WORKFLOW_URL is missing the code falls back to the legacy
-template.
+✓ Works with **Serverless Workflow** URLs  
+✓ Falls back to legacy `detect.roboflow.com/<project>/<version>`  
+✓ No batch limit – one image per HTTP call (Streamlit already loops)  
+✓ Recursively extracts:
+   • per-class `predictions` lists
+   • `counts` dicts
+   • Roboflow’s new `output_image` → {type:"base64", value:"…"} field
 """
 
 from __future__ import annotations
@@ -35,13 +21,11 @@ from typing import Dict, List, Optional, Tuple, Union
 import aiohttp
 
 ##############################################################################
-# Edit these defaults if you don’t want to rely on env vars.
-##############################################################################
 DEFAULT_WORKFLOW_URL = (
     "https://serverless.roboflow.com/infer/workflows/"
     "deer-appv1/detect-count-and-visualize-2"
 )
-DEFAULT_PROJECT_VER = ""  # e.g. "deer-detect/1"
+DEFAULT_PROJECT_VER = ""  # For legacy mode, e.g. "deer-detect/1"
 ##############################################################################
 
 logger = logging.getLogger(__name__)
@@ -54,7 +38,6 @@ CLASSES = ("buck", "deer", "doe")
 class RoboflowClient:
     """Async helper for Roboflow inference."""
 
-    # ------------------------------------------------------------------ #
     def __init__(
         self,
         *,
@@ -67,9 +50,11 @@ class RoboflowClient:
             raise ValueError("ROBOFLOW_API_KEY must be set.")
 
         self.workflow_url = (
-            (workflow_url or os.getenv("ROBOFLOW_WORKFLOW_URL") or DEFAULT_WORKFLOW_URL)
-            .rstrip("/")
-        )
+            workflow_url
+            or os.getenv("ROBOFLOW_WORKFLOW_URL")
+            or DEFAULT_WORKFLOW_URL
+        ).rstrip("/")
+
         self.legacy_project_ver = (
             legacy_project_ver
             or os.getenv("ROBOFLOW_PROJECT_VER")
@@ -78,10 +63,12 @@ class RoboflowClient:
 
         self._use_workflow = "serverless.roboflow.com" in self.workflow_url
         logger.info(
-            "Roboflow mode = %s   url = %s",
+            "Roboflow mode = %s | url = %s",
             "workflow" if self._use_workflow else "legacy",
-            self.workflow_url if self._use_workflow else LEGACY_TEMPLATE.format(
-                project_ver=self.legacy_project_ver, api_key="***"
+            self.workflow_url
+            if self._use_workflow
+            else LEGACY_TEMPLATE.format(
+                project_ver=self.legacy_project_ver or "<unset>", api_key="***"
             ),
         )
 
@@ -96,7 +83,7 @@ class RoboflowClient:
             return await self._call_workflow(session, image_bytes)
         return await self._call_legacy(session, image_bytes, filename)
 
-    # == Workflow mode ================================================== #
+    # === Serverless workflow ========================================== #
     async def _call_workflow(
         self, session: aiohttp.ClientSession, img: bytes
     ) -> Tuple[bytes, Dict[str, int]]:
@@ -115,7 +102,7 @@ class RoboflowClient:
             data = await r.json()
             return self._parse_response(data)
 
-    # == Legacy mode ==================================================== #
+    # === Legacy hosted model ========================================== #
     async def _call_legacy(
         self, session: aiohttp.ClientSession, img: bytes, filename: str
     ) -> Tuple[bytes, Dict[str, int]]:
@@ -135,30 +122,28 @@ class RoboflowClient:
     @staticmethod
     def _parse_response(data: Union[Dict, List]) -> Tuple[bytes, Dict[str, int]]:
         """
-        Robustly pull ``counts`` and an annotated image string from **any**
-        shape.  We recurse through dicts & lists until we find:
-        • a ``counts`` dict or ``predictions`` list
-        • an ``image`` / ``annotated_image`` / ``visualization`` string
+        Recursively gather:
+        • class counts  (from `predictions` list or `counts` dict)
+        • annotated image (from `output_image.value` or any *_image key)
         """
-        # --- dump once for debugging ------------------------------------
+
+        # Dump first payload for debugging
         if not getattr(RoboflowClient, "_dumped", False):
-            logger.info("RAW ROBOFLOW RESPONSE (truncated to 2k):\n%s",
-                        json.dumps(data)[:2000])
+            logger.info("RAW ROBOFLOW RESPONSE (trunc 2 k):\n%s", json.dumps(data)[:2000])
             RoboflowClient._dumped = True
 
         counts = {cls: 0 for cls in CLASSES}
-        annotated_b64: Optional[str] = None
+        image_b64: Optional[str] = None
 
         def walk(node: Union[Dict, List]) -> None:
-            nonlocal annotated_b64
+            nonlocal image_b64
             if isinstance(node, dict):
-                # counts dict
+                # ---- class counts -----------------------------------------
                 if "counts" in node and isinstance(node["counts"], dict):
                     for cls in CLASSES:
                         if isinstance(node["counts"].get(cls), (int, float)):
                             counts[cls] += int(node["counts"][cls])
 
-                # predictions list
                 preds = node.get("predictions") or node.get("detections")
                 if isinstance(preds, list):
                     for p in preds:
@@ -166,14 +151,24 @@ class RoboflowClient:
                         if cls in counts:
                             counts[cls] += 1
 
-                # annotated image string
-                if annotated_b64 is None:
-                    for key in ("image", "annotated_image", "media", "visualization"):
-                        if isinstance(node.get(key), str):
-                            annotated_b64 = node[key]
-                            break
+                # ---- annotated image --------------------------------------
+                if image_b64 is None:
+                    # New workflow field: output_image {type:"base64", value:"..."}
+                    if (
+                        "output_image" in node
+                        and isinstance(node["output_image"], dict)
+                        and node["output_image"].get("type") == "base64"
+                        and isinstance(node["output_image"].get("value"), str)
+                    ):
+                        image_b64 = node["output_image"]["value"]
 
-                # recurse
+                    if image_b64 is None:
+                        for key in ("image", "annotated_image", "media", "visualization"):
+                            if isinstance(node.get(key), str):
+                                image_b64 = node[key]
+                                break
+
+                # ---- recurse further --------------------------------------
                 for v in node.values():
                     if isinstance(v, (dict, list)):
                         walk(v)
@@ -184,14 +179,14 @@ class RoboflowClient:
 
         walk(data)
 
-        # decode image if present
-        annot_bytes = b""
-        if annotated_b64:
-            if "," in annotated_b64:  # strip data URI
-                annotated_b64 = annotated_b64.split(",", 1)[1]
+        # decode / return
+        img_bytes = b""
+        if image_b64:
+            if "," in image_b64:
+                image_b64 = image_b64.split(",", 1)[1]
             try:
-                annot_bytes = base64.b64decode(annotated_b64)
+                img_bytes = base64.b64decode(image_b64)
             except Exception:
                 pass
 
-        return annot_bytes, counts
+        return img_bytes, counts
