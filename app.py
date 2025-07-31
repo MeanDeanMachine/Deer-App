@@ -318,18 +318,51 @@ if uploaded_files:
                 fig.update_layout(showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
-                # Top 5 dates per class
-                st.header("Top 5 Dates per Class")
-                top_dates = summary.get("top_dates", {})
-                date_cols = st.columns(3)
-                for idx, cls in enumerate(["buck", "deer", "doe"]):
-                    sub_df = top_dates.get(cls, pd.DataFrame())
-                    with date_cols[idx]:
-                        st.subheader(cls.capitalize())
-                        if not sub_df.empty:
-                            st.table(sub_df)
-                        else:
-                            st.write("No data available")
+                # ── Daily activity stacked bar chart ───────────────────────
+                st.header("Daily Activity (stacked by class)")
+
+                if df["date_time"].notna().any():
+                    # Extract just YYYY-MM-DD
+                    dt_series = pd.to_datetime(df["date_time"], errors="coerce")
+                    df_dates = df.copy()
+                    df_dates["date"] = dt_series.dt.date
+
+                    # Sum counts per date
+                    agg = (
+                        df_dates.groupby("date", as_index=False)
+                        .agg(
+                            buck_count=("buck_count", "sum"),
+                            deer_count=("deer_count", "sum"),
+                            doe_count=("doe_count", "sum"),
+                        )
+                        .sort_values("date")          # chronological order
+                    )
+
+                    # Reshape for stacked bar
+                    plot_df = agg.melt(
+                        id_vars="date",
+                        value_vars=["buck_count", "deer_count", "doe_count"],
+                        var_name="Class",
+                        value_name="Count",
+                    )
+                    plot_df["Class"] = plot_df["Class"].str.replace("_count", "").str.title()
+
+                    fig_stacked = px.bar(
+                        plot_df,
+                        x="date",
+                        y="Count",
+                        color="Class",
+                        title="Activity by Date (Buck / Deer / Doe)",
+                        labels={"date": "Date"},
+                    )
+                    fig_stacked.update_layout(
+                        barmode="stack",
+                        xaxis_type="category",
+                        xaxis_tickangle=-45,
+                    )
+                    st.plotly_chart(fig_stacked, use_container_width=True)
+                else:
+                    st.info("No date metadata available to build chart.")
 
                 # CSV download button
                 csv = df.to_csv(index=False).encode("utf-8")
