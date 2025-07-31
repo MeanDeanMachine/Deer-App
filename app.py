@@ -343,8 +343,8 @@ if uploaded_files:
                 # ── Annotated image gallery ────────────────────────────────
                 st.header("Annotated Images")
 
+                THUMB_W = 800  # fixed thumbnail width
                 categories = categorise_results(results)
-                THUMB_W = 800  # fixed width, no slider
 
                 for category_name in ["Buck", "Deer", "Doe", "No Tag"]:
                     images = categories.get(category_name, [])
@@ -354,17 +354,27 @@ if uploaded_files:
                             continue
 
                         for res in images:
-                            if res.annotated_image:
-                                b64 = base64.b64encode(res.annotated_image).decode()
-                                uri = f"data:image/jpeg;base64,{b64}"
-                                st.markdown(
-                                    f'<a href="{uri}" target="_blank">'
-                                    f'<img src="{uri}" width="{THUMB_W}" '
-                                    f'style="margin:4px;border:1px solid #ddd;border-radius:4px;" '
-                                    f'title="{res.file_name} | {res.date_time or "Unknown"}">'
-                                    f'</a>',
-                                    unsafe_allow_html=True,
-                                )
-                            else:
+                            if not res.annotated_image:
                                 st.write(f"{res.file_name} (no annotated image)")
+                                continue
 
+                            # Convert JPEG bytes to a data URI
+                            b64 = base64.b64encode(res.annotated_image).decode()
+                            uri = f"data:image/jpeg;base64,{b64}"
+                            title = f"{res.file_name} | {res.date_time or 'Unknown'}"
+
+                            # Streamlit `html` component to render thumbnail + JS click handler
+                            st.components.v1.html(
+                                f"""
+                                <img src="{uri}"
+                                     width="{THUMB_W}"
+                                     title="{title}"
+                                     style="margin:4px;border:1px solid #ddd;border-radius:4px;cursor:pointer;"
+                                     onclick="
+                                       const w = window.open('about:blank');
+                                       w.document.write(`<img src='{uri}' style='width:100%;'>`);
+                                     ">
+                                """,
+                                height=int(THUMB_W * 0.75) + 12,  # enough for one row
+                                scrolling=False,
+                            )
