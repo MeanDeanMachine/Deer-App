@@ -340,20 +340,35 @@ if uploaded_files:
                     mime="text/csv",
                 )
 
-                # Annotated image gallery
+                # ── Annotated image gallery ────────────────────────────────
                 st.header("Annotated Images")
+
+                # slider so you can resize thumbnails on the fly
+                thumb_w = st.slider(
+                    "Thumbnail width (px)", 300, 800, 500, step=50, key="thumb_size"
+                )
+
                 categories = categorise_results(results)
                 for category_name in ["Buck", "Deer", "Doe", "No Tag"]:
                     images = categories.get(category_name, [])
                     with st.expander(f"{category_name} ({len(images)})", expanded=False):
+                        if not images:
+                            st.write("No images in this category.")
+                            continue
+
                         for res in images:
                             if res.annotated_image:
-                                # Display the annotated image with a uniform width
-                                st.image(
-                                    res.annotated_image,
-                                    caption=f"{res.file_name} | {res.date_time or 'Unknown'}",
-                                    width=300,
+                                # convert JPEG bytes → data URI so we can wrap <img> in a link
+                                b64 = base64.b64encode(res.annotated_image).decode()
+                                uri = f"data:image/jpeg;base64,{b64}"
+
+                                # clickable thumbnail → opens full size in a new tab
+                                st.markdown(
+                                    f'<a href="{uri}" target="_blank">'
+                                    f'<img src="{uri}" width="{thumb_w}" '
+                                    f'style="margin:4px;border:1px solid #ddd;border-radius:4px;" '
+                                    f'title="{res.file_name} | {res.date_time or "Unknown"}"></a>',
+                                    unsafe_allow_html=True,
                                 )
                             else:
-                                # If there is no annotated image due to error, show placeholder
-                                st.write(f"{res.file_name} (no image)")
+                                st.write(f"{res.file_name} (no annotated image)")
