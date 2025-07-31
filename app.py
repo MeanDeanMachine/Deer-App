@@ -468,6 +468,7 @@ if uploaded_files:
                             ),
                         ]
                     )
+                    fig_heat.update_yaxes(autorange="reversed")
                     fig_heat.update_layout(
                         barmode="stack",
                         yaxis_title="Time of Day",
