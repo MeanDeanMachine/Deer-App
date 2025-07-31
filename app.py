@@ -31,6 +31,9 @@ import streamlit as st
 import plotly.express as px
 import aiohttp
 
+import plotly.graph_objects as go
+from plotly.colors import sequential
+
 from roboflow_client import RoboflowClient
 from exif_utils import extract_datetime_original
 
@@ -370,6 +373,115 @@ if uploaded_files:
                     st.plotly_chart(fig_stacked, use_container_width=True)
                 else:
                     st.info("No date metadata available to build chart.")
+
+               # ── Time-of-day activity heatmap ───────────────────────────
+                st.header("Activity by Time of Day")
+
+                if df["date_time"].notna().any():
+                    # helper → assign bucket label
+                    def tod_bucket(ts: pd.Timestamp | None) -> str | None:
+                        if pd.isna(ts):
+                            return None
+                        t = ts.time()
+                        mins = t.hour * 60 + t.minute
+                        if 360 <= mins <= 480:        # 06:00–08:00
+                            return "Dawn"
+                        elif 481 <= mins <= 660:      # 08:01–11:00
+                            return "Morning"
+                        elif 661 <= mins <= 960:      # 11:01–16:00
+                            return "Midday"
+                        elif 961 <= mins <= 1110:     # 16:01–18:30
+                            return "Afternoon"
+                        elif 1111 <= mins <= 1259:    # 18:31–20:59 ≈ evening twilight
+                            return "Evening"
+                        else:                         # 21:00–05:59
+                            return "Night"
+
+                    dt_series = pd.to_datetime(df["date_time"], errors="coerce")
+                    df_heat = df.copy()
+                    df_heat["date"] = dt_series.dt.date
+                    df_heat["bucket"] = dt_series.apply(tod_bucket)
+
+                    # sum counts per date+bucket
+                    agg = (
+                        df_heat.groupby(["bucket", "date"], as_index=False)
+                        .agg(
+                            buck=("buck_count", "sum"),
+                            deer=("deer_count", "sum"),
+                            doe=("doe_count", "sum"),
+                        )
+                    )
+                    agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
+
+                    bucket_order = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
+                    date_order = sorted(agg["date"].unique())
+
+                    # heatmap matrix
+                    z = [
+                        [
+                            int(
+                                agg.loc[
+                                    (agg.bucket == b) & (agg.date == d), "activity"
+                                ].sum()
+                            )
+                            for d in date_order
+                        ]
+                        for b in bucket_order
+                    ]
+
+                    # bubble overlay for bucks
+                    scatter_x, scatter_y, scatter_size, scatter_cnt = [], [], [], []
+                    for b in bucket_order:
+                        for d in date_order:
+                            bucks = int(
+                                agg.loc[(agg.bucket == b) & (agg.date == d), "buck"].sum()
+                            )
+                            if bucks > 0:
+                                scatter_x.append(d)
+                                scatter_y.append(b)
+                                scatter_size.append(bucks * 10 + 8)  # scale factor
+                                scatter_cnt.append(bucks)
+
+                    fig_heat = go.Figure(
+                        data=[
+                            go.Heatmap(
+                                z=z,
+                                x=date_order,
+                                y=bucket_order,
+                                colorscale=sequential.Blues,
+                                colorbar=dict(title="Total Activity"),
+                                hovertemplate="Date: %{x}<br>Bucket: %{y}<br>Activity: %{z}<extra></extra>",
+                            ),
+                            go.Scatter(
+                                x=scatter_x,
+                                y=scatter_y,
+                                mode="markers",
+                                marker=dict(
+                                    size=scatter_size,
+                                    color="#228B22",
+                                    opacity=0.85,
+                                    line=dict(width=1, color="white"),
+                                ),
+                                customdata=scatter_cnt,
+                                hovertemplate="Date: %{x}<br>Bucket: %{y}<br>Bucks: %{customdata}<extra></extra>",
+                                showlegend=False,
+                            ),
+                        ]
+                    )
+                    fig_heat.update_layout(
+                        barmode="stack",
+                        yaxis_title="Time of Day",
+                        xaxis_title="Date",
+                        title=(
+                            "Heatmap of Deer + Doe + Buck Activity<br>"
+                            "<span style='font-size:0.8em'>(bubble size = buck count)</span>"
+                        ),
+                        xaxis_type="category",
+                        xaxis_tickangle=-45,
+                    )
+                    st.plotly_chart(fig_heat, use_container_width=True)
+                else:
+                    st.info("No timestamp data available for heatmap.")
 
                 # CSV download button
                 csv = df.to_csv(index=False).encode("utf-8")
