@@ -324,8 +324,9 @@ if "edited_df" in st.session_state:
 
     # gallery ----------------------------------------------------------
     st.header("Annotated Images")
-    cats = categorise(results, df)
+
     THUMB_W = 800
+    cats = categorise(results, st.session_state.edited_df)
 
     for cat_name in ["Buck", "Deer", "Doe", "No Tag"]:
         imgs = cats.get(cat_name, [])
@@ -333,22 +334,54 @@ if "edited_df" in st.session_state:
             if not imgs:
                 st.write("No images.")
                 continue
+
             for res in imgs:
                 if not res.annotated_image:
                     st.write(f"{res.file_name} (no annotated image)")
                     continue
+
+                # ------------- thumbnail ---------------------------------
                 b64 = base64.b64encode(res.annotated_image).decode()
                 uri = f"data:image/jpeg;base64,{b64}"
-                st.components.v1.html(
-                    f"""
-                    <img src="{uri}" width="{THUMB_W}"
-                         title="{res.file_name}"
-                         style="margin:4px;border:1px solid #ddd;border-radius:4px;cursor:pointer;"
-                         onclick="
-                           const w = window.open('about:blank');
-                           w.document.write(`<img src='{uri}' style='width:100%;'>`);
-                         ">
-                    """,
-                    height=int(THUMB_W * .75) + 12,
-                    scrolling=False,
-                )
+
+                # current counts from edited_df
+                row = st.session_state.edited_df.loc[
+                    st.session_state.edited_df["file_name"] == res.file_name
+                ].iloc[0]
+
+                col_img, col_edit = st.columns([3, 2])
+
+                with col_img:
+                    st.components.v1.html(
+                        f"""
+                        <div style="text-align:center">
+                          <img src="{uri}" width="{THUMB_W}"
+                               style="margin:4px;border:1px solid #ddd;border-radius:4px;cursor:pointer;"
+                               onclick="const w=window.open('about:blank');w.document.write(`<img src='{uri}' style='width:100%;'>`);">
+                          <div style="font-weight:bold;margin-bottom:4px">{res.file_name}</div>
+                        </div>
+                        """,
+                        height=int(THUMB_W * 0.75) + 60,
+                        scrolling=False,
+                    )
+
+                with col_edit:
+                    st.markdown("**Override counts**")
+                    buck_val = st.number_input(
+                        "Buck", min_value=0, value=int(row.buck_count),
+                        key=f"buck_{res.file_name}"
+                    )
+                    deer_val = st.number_input(
+                        "Deer", min_value=0, value=int(row.deer_count),
+                        key=f"deer_{res.file_name}"
+                    )
+                    doe_val = st.number_input(
+                        "Doe", min_value=0, value=int(row.doe_count),
+                        key=f"doe_{res.file_name}"
+                    )
+
+                    # commit the edits to session_state.edited_df
+                    st.session_state.edited_df.loc[
+                        st.session_state.edited_df["file_name"] == res.file_name,
+                        ["buck_count", "deer_count", "doe_count"],
+                    ] = [buck_val, deer_val, doe_val]
