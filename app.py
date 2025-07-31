@@ -343,12 +343,9 @@ if uploaded_files:
                 # ── Annotated image gallery ────────────────────────────────
                 st.header("Annotated Images")
 
-                # slider so you can resize thumbnails on the fly
-                thumb_w = st.slider(
-                    "Thumbnail width (px)", 300, 800, 500, step=50, key="thumb_size"
-                )
-
                 categories = categorise_results(results)
+                THUMB_W = 800  # fixed width, no slider
+
                 for category_name in ["Buck", "Deer", "Doe", "No Tag"]:
                     images = categories.get(category_name, [])
                     with st.expander(f"{category_name} ({len(images)})", expanded=False):
@@ -358,17 +355,16 @@ if uploaded_files:
 
                         for res in images:
                             if res.annotated_image:
-                                # convert JPEG bytes → data URI so we can wrap <img> in a link
                                 b64 = base64.b64encode(res.annotated_image).decode()
                                 uri = f"data:image/jpeg;base64,{b64}"
-
-                                # clickable thumbnail → opens full size in a new tab
                                 st.markdown(
                                     f'<a href="{uri}" target="_blank">'
-                                    f'<img src="{uri}" width="{thumb_w}" '
+                                    f'<img src="{uri}" width="{THUMB_W}" '
                                     f'style="margin:4px;border:1px solid #ddd;border-radius:4px;" '
-                                    f'title="{res.file_name} | {res.date_time or "Unknown"}"></a>',
+                                    f'title="{res.file_name} | {res.date_time or "Unknown"}">'
+                                    f'</a>',
                                     unsafe_allow_html=True,
                                 )
                             else:
                                 st.write(f"{res.file_name} (no annotated image)")
+
