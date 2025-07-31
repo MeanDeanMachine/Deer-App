@@ -62,6 +62,17 @@ async def _process_single(
         annotated, counts = await rf_client.process_image(
             session, image_bytes, file_name
         )
+           # ── NEW: shrink annotated JPEG to ≤600 px width to save RAM ──
+        try:
+            img = Image.open(BytesIO(annotated))
+            img.thumbnail((600, 600), Image.LANCZOS)      # long edge ≤600
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            annotated = buf.getvalue()
+        except Exception:
+            # If Pillow fails, fall back to original bytes
+            pass
+
         return ImageResult(
             file_name=file_name,
             date_time=date_time,
@@ -198,7 +209,8 @@ if uploader:
 
     if st.button("Process Images"):
         with st.spinner("Calling Roboflow…"):
-            data = [(f.name, f.read()) for f in uploader]
+            # Pre-load all JPEG bytes (list stays in RAM only until we clear it)
+            files_data = [(f.name, f.read()) for f in uploader]
 
             try:
                 client = RoboflowClient()
@@ -206,12 +218,15 @@ if uploader:
                 st.error(str(e))
                 st.stop()
 
-            results = asyncio.run(process_images_async(data, client))
+            # async inference
+            results = asyncio.run(process_images_async(files_data, client))
 
-        # cache raw results
+            files_data.clear()          # <<< free raw upload bytes
+
+        # cache results for UI / editing
         st.session_state["image_results"] = results
-        st.session_state["orig_df"] = to_dataframe(results)
-        st.session_state["edited_df"] = st.session_state["orig_df"].copy()
+        st.session_state["orig_df"]     = to_dataframe(results)
+        st.session_state["edited_df"]   = st.session_state["orig_df"].copy()
 
 # show editor / analytics if results exist ----------------------------
 if "edited_df" in st.session_state:
