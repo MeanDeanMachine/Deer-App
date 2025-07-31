@@ -1,22 +1,12 @@
 """
-Main Streamlit application for the DeerLens project.
-
-This script wires together the user interface and business logic for
-uploading images, performing inference via Roboflow, extracting EXIF
-metadata, aggregating results and visualising them.  The app is designed
-to operate on batches of up to 900 JPEG images uploaded through a file
-uploader.  All processing is performed asynchronously to maximise
-throughput and provide responsive progress feedback.
-
-To run the app locally:
-
-1. Create a virtual environment (optional but recommended).
-2. Install dependencies with ``pip install -r requirements.txt``.
-3. Set the environment variables ``ROBOFLOW_API_KEY`` and
-   ``ROBOFLOW_WORKFLOW_ID`` in your shell.
-4. Execute ``streamlit run app.py``.
-
-Refer to the accompanying README for more detailed setup instructions.
+DeerLens – Streamlit front-end
+==============================
+* Upload up to 900 JPEGs
+* Runs Roboflow workflow asynchronously
+* Shows KPI cards, stacked bar, time-of-day heat-map
+* Clickable 800-px thumbnails
+* **NEW:** Inline editor lets you adjust mis-classified counts, instantly
+           refreshing all visuals and the downloadable CSV.
 """
 
 from __future__ import annotations
@@ -24,27 +14,23 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
-import streamlit as st
-import plotly.express as px
 import aiohttp
-
+import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 from plotly.colors import sequential
+import streamlit as st
 
-from roboflow_client import RoboflowClient
 from exif_utils import extract_datetime_original
+from roboflow_client import RoboflowClient
 
-
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 # Data structures
-# ---------------------------------------------------------------------------
-
+# ──────────────────────────────────────────────────────────────────────
 @dataclass
 class ImageResult:
-    """Container for per‑image inference results."""
     file_name: str
     date_time: Optional[str]
     buck_count: int
@@ -54,58 +40,34 @@ class ImageResult:
     error: Optional[str] = None
 
 
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
+# ──────────────────────────────────────────────────────────────────────
+# Async inference helpers
+# ──────────────────────────────────────────────────────────────────────
 async def _process_single(
     session: aiohttp.ClientSession,
     rf_client: RoboflowClient,
     file_name: str,
     image_bytes: bytes,
 ) -> ImageResult:
-    """Process a single image through Roboflow and extract EXIF metadata.
-
-    This helper is intended to be called within an asyncio event loop.
-
-    Parameters
-    ----------
-    session:
-        A shared :class:`aiohttp.ClientSession` for making HTTP requests.
-    rf_client:
-        A :class:`RoboflowClient` instance configured with API key and workflow ID.
-    file_name:
-        The original filename of the image.
-    image_bytes:
-        Raw JPEG bytes of the image.
-
-    Returns
-    -------
-    ImageResult
-        The result containing counts, timestamp and annotated image.
-    """
+    """Send one image to Roboflow and return counts + annotated JPEG."""
     try:
-        # Extract EXIF DateTimeOriginal
         date_time = extract_datetime_original(image_bytes)
     except Exception:
-        # Log but do not fail the entire image processing
         date_time = None
 
     try:
-        annotated_image, counts = await rf_client.process_image(session, image_bytes, file_name)
-        buck_count = counts.get("buck", 0)
-        deer_count = counts.get("deer", 0)
-        doe_count = counts.get("doe", 0)
+        annotated, counts = await rf_client.process_image(
+            session, image_bytes, file_name
+        )
         return ImageResult(
             file_name=file_name,
             date_time=date_time,
-            buck_count=buck_count,
-            deer_count=deer_count,
-            doe_count=doe_count,
-            annotated_image=annotated_image,
+            buck_count=counts.get("buck", 0),
+            deer_count=counts.get("deer", 0),
+            doe_count=counts.get("doe", 0),
+            annotated_image=annotated,
         )
     except Exception as exc:
-        # Capture the exception and return a result with zero counts
         return ImageResult(
             file_name=file_name,
             date_time=date_time,
@@ -118,416 +80,275 @@ async def _process_single(
 
 
 async def process_images_async(
-    files: List[Tuple[str, bytes]],
-    rf_client: RoboflowClient,
+    files: List[Tuple[str, bytes]], rf_client: RoboflowClient
 ) -> List[ImageResult]:
-    """Process multiple images concurrently and return their results.
+    """Concurrently process many images."""
+    results, processed, total = [], 0, len(files)
+    bar = st.progress(0)
+    sem = asyncio.Semaphore(5)
 
-    Parameters
-    ----------
-    files:
-        A list of tuples ``(file_name, image_bytes)``.
-    rf_client:
-        An instance of :class:`RoboflowClient` used to invoke the inference endpoint.
-
-    Returns
-    -------
-    List[ImageResult]
-        A list of results corresponding to the input files, in no particular order.
-    """
-    results: List[ImageResult] = []
-    total = len(files)
-    # Display a progress bar that updates as each image finishes processing
-    progress_bar = st.progress(0)
-    processed = 0
-
-    semaphore = asyncio.Semaphore(5)  # Limit concurrency to avoid overwhelming the API
     async with aiohttp.ClientSession() as session:
 
-        async def wrapped_process(file_name: str, image_bytes: bytes) -> ImageResult:
-            async with semaphore:
-                return await _process_single(session, rf_client, file_name, image_bytes)
+        async def task(name: str, data: bytes) -> ImageResult:
+            async with sem:
+                return await _process_single(session, rf_client, name, data)
 
-        # Kick off all tasks
-        tasks = [wrapped_process(fname, data) for fname, data in files]
-        for future in asyncio.as_completed(tasks):
-            result = await future
-            results.append(result)
+        tasks = [task(n, b) for n, b in files]
+        for fut in asyncio.as_completed(tasks):
+            res = await fut
+            results.append(res)
             processed += 1
-            progress_bar.progress(processed / total)
-    progress_bar.empty()
+            bar.progress(processed / total)
+    bar.empty()
     return results
 
 
-def aggregate_results(results: List[ImageResult]) -> pd.DataFrame:
-    """Convert a list of ImageResult objects into a tidy DataFrame."""
-    records = []
-    for res in results:
-        records.append(
-            {
-                "file_name": res.file_name,
-                "date_time": res.date_time,
-                "buck_count": res.buck_count,
-                "deer_count": res.deer_count,
-                "doe_count": res.doe_count,
-                "any_tagged": bool(res.buck_count or res.deer_count or res.doe_count),
-            }
-        )
-    df = pd.DataFrame(records)
-    return df
-
-
-def compute_summary_stats(df: pd.DataFrame) -> Dict[str, any]:
-    """Compute summary statistics and top dates from the DataFrame."""
-    summary: Dict[str, any] = {}
-    summary["total_images"] = len(df)
-    summary["total_buck"] = int(df["buck_count"].sum())
-    summary["total_deer"] = int(df["deer_count"].sum())
-    summary["total_doe"] = int(df["doe_count"].sum())
-
-    # Convert date_time strings to date objects for grouping.  Missing dates become NaT.
-    if df["date_time"].notna().any():
-        dt_series = pd.to_datetime(df["date_time"], errors="coerce")
-        df_dates = df.copy()
-        df_dates["date"] = dt_series.dt.date
-        top_dates: Dict[str, pd.DataFrame] = {}
-        for cls in ["buck", "deer", "doe"]:
-            counts_per_date = (
-                df_dates.groupby("date")[f"{cls}_count"].sum().nlargest(5)
+# ──────────────────────────────────────────────────────────────────────
+# Data wrangling
+# ──────────────────────────────────────────────────────────────────────
+def to_dataframe(results: List[ImageResult]) -> pd.DataFrame:
+    """Results ➜ tidy DataFrame."""
+    return pd.DataFrame(
+        [
+            dict(
+                file_name=r.file_name,
+                date_time=r.date_time,
+                buck_count=r.buck_count,
+                deer_count=r.deer_count,
+                doe_count=r.doe_count,
             )
-            top_dates[cls] = counts_per_date.reset_index().rename(columns={"index": "date", f"{cls}_count": "count"})
-        summary["top_dates"] = top_dates
-    else:
-        summary["top_dates"] = {cls: pd.DataFrame(columns=["date", "count"]) for cls in ["buck", "deer", "doe"]}
-    return summary
+            for r in results
+        ]
+    )
 
 
-def categorise_results(results: List[ImageResult]) -> Dict[str, List[ImageResult]]:
-    """Assign each image to one of four categories based on its highest count.
+def compute_summary(df: pd.DataFrame) -> Dict[str, int]:
+    return dict(
+        total_images=len(df),
+        total_buck=int(df["buck_count"].sum()),
+        total_deer=int(df["deer_count"].sum()),
+        total_doe=int(df["doe_count"].sum()),
+    )
 
-    The categories are ``Buck``, ``Deer``, ``Doe`` and ``No Tag``.
-    Ties are resolved by the order Buck → Deer → Doe.  Images with zero
-    counts in all categories are assigned to ``No Tag``.
-    """
-    categories: Dict[str, List[ImageResult]] = {"Buck": [], "Deer": [], "Doe": [], "No Tag": []}
+
+def bucket_time(ts: pd.Timestamp | None) -> str | None:
+    if pd.isna(ts):
+        return None
+    m = ts.hour * 60 + ts.minute
+    if 360 <= m <= 480:
+        return "Dawn"
+    if 481 <= m <= 660:
+        return "Morning"
+    if 661 <= m <= 960:
+        return "Midday"
+    if 961 <= m <= 1110:
+        return "Afternoon"
+    if 1111 <= m <= 1259:
+        return "Evening"
+    return "Night"
+
+
+def categorise(results: List[ImageResult], df_counts: pd.DataFrame) -> Dict[str, List[ImageResult]]:
+    """Bucket each ImageResult according to edited counts."""
+    latest = df_counts.set_index("file_name")
+    cat: Dict[str, List[ImageResult]] = {"Buck": [], "Deer": [], "Doe": [], "No Tag": []}
     for res in results:
-        # Determine which class has the maximum count
-        counts = {"Buck": res.buck_count, "Deer": res.deer_count, "Doe": res.doe_count}
-        max_count = max(counts.values())
-        if max_count == 0:
-            categories["No Tag"].append(res)
+        if res.file_name not in latest.index:
+            cat["No Tag"].append(res)
+            continue
+        row = latest.loc[res.file_name]
+        counts = {"Buck": row.buck_count, "Deer": row.deer_count, "Doe": row.doe_count}
+        mx = max(counts.values())
+        if mx == 0:
+            cat["No Tag"].append(res)
+        elif counts["Buck"] == mx:
+            cat["Buck"].append(res)
+        elif counts["Deer"] == mx:
+            cat["Deer"].append(res)
         else:
-            # In case of ties, priority order is Buck > Deer > Doe
-            if counts["Buck"] == max_count:
-                categories["Buck"].append(res)
-            elif counts["Deer"] == max_count:
-                categories["Deer"].append(res)
-            else:
-                categories["Doe"].append(res)
-    return categories
+            cat["Doe"].append(res)
+    return cat
 
 
-# ---------------------------------------------------------------------------
-# Streamlit page configuration
-# ---------------------------------------------------------------------------
-
+# ──────────────────────────────────────────────────────────────────────
+# Streamlit UI
+# ──────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="DeerLens", layout="wide")
 st.title("🦌 DeerLens – Deer Detection and Analysis")
 st.markdown(
     """
-    Upload between **1 and 900** JPEG images captured from your trail camera and
-    let DeerLens automatically identify deer and compute summary statistics.
-    All processing runs locally in this session and no images are stored
-    permanently.
-    """
+Upload between **1 and 900** JPEG images from your trail cam.
+DeerLens detects deer, draws bounding boxes, and gives you instant stats.
+"""
 )
 
-
-# File uploader
-uploaded_files = st.file_uploader(
-    label="Select JPEG images",
-    type=["jpg", "jpeg"],
-    accept_multiple_files=True,
-    help="Hold Ctrl/Cmd to select multiple files."
+uploader = st.file_uploader(
+    "Select JPEG images", type=["jpg", "jpeg"], accept_multiple_files=True
 )
+error_box = st.empty()
 
-# Container for errors to display at the end
-error_placeholder = st.empty()
+# run pipeline ---------------------------------------------------------
+if uploader:
+    if not 1 <= len(uploader) <= 900:
+        st.warning("Select 1-900 images.")
+        st.stop()
 
-if uploaded_files:
-    num_files = len(uploaded_files)
-    if num_files < 1:
-        st.warning(
-            f"Please select at least 1 image. You have selected {num_files} file(s)."
+    if st.button("Process Images"):
+        with st.spinner("Calling Roboflow…"):
+            data = [(f.name, f.read()) for f in uploader]
+
+            try:
+                client = RoboflowClient()
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
+
+            results = asyncio.run(process_images_async(data, client))
+
+        # cache raw results
+        st.session_state["image_results"] = results
+        st.session_state["orig_df"] = to_dataframe(results)
+        st.session_state["edited_df"] = st.session_state["orig_df"].copy()
+
+# show editor / analytics if results exist ----------------------------
+if "edited_df" in st.session_state:
+    df = st.session_state["edited_df"]
+    results = st.session_state["image_results"]
+
+    # editable grid ----------------------------------------------------
+    st.subheader("Review / correct counts")
+    edited = st.data_editor(
+        df,
+        disabled=["file_name", "date_time"],
+        key="editor",
+        num_rows="fixed",
+        use_container_width=True,
+    )
+    if st.button("Apply overrides", key="apply"):
+        st.session_state["edited_df"] = edited
+        df = edited  # refresh local reference
+
+    # KPI cards --------------------------------------------------------
+    smry = compute_summary(df)
+    st.header("Summary Metrics")
+    col = st.columns(4)
+    col[0].metric("Images", smry["total_images"])
+    col[1].metric("Buck", smry["total_buck"])
+    col[2].metric("Deer", smry["total_deer"])
+    col[3].metric("Doe", smry["total_doe"])
+
+    # stacked bar ------------------------------------------------------
+    if df["date_time"].notna().any():
+        dt = pd.to_datetime(df["date_time"], errors="coerce")
+        bar_df = df.copy()
+        bar_df["date"] = dt.dt.date
+        agg = (
+            bar_df.groupby("date", as_index=False)
+            .sum(numeric_only=True)
+            .sort_values("date")
         )
-    elif num_files > 900:
-        st.warning(
-            f"You have selected {num_files} images which exceeds the 900 image limit."
+        melt = agg.melt("date", ["buck_count", "deer_count", "doe_count"],
+                        var_name="Class", value_name="Count")
+        melt["Class"] = melt["Class"].str.replace("_count", "").str.title()
+        fig = px.bar(
+            melt,
+            x="date",
+            y="Count",
+            color="Class",
+            color_discrete_map={
+                "Buck": "#228B22",
+                "Doe": "#FFC0CB",
+                "Deer": "#D2B48C",
+            },
+            title="Activity by Date (stacked)",
+            labels={"date": "Date"},
         )
-    else:
-        if st.button("Process Images", key="process_button"):
-            with st.spinner("Processing images, please wait..."):
-                # Preload file bytes to avoid reading the same file object in multiple threads
-                files_data: List[Tuple[str, bytes]] = []
-                for uploaded_file in uploaded_files:
-                    try:
-                        file_bytes = uploaded_file.read()
-                        files_data.append((uploaded_file.name, file_bytes))
-                    except Exception:
-                        # Skip files that cannot be read
-                        st.warning(f"Unable to read file: {uploaded_file.name}")
+        fig.update_layout(barmode="stack", xaxis_tickangle=-45)
+        st.plotly_chart(fig, use_container_width=True)
 
-                # Instantiate the Roboflow client (will throw if env vars are missing)
-                try:
-                    rf_client = RoboflowClient()
-                except Exception as exc:
-                    st.error(str(exc))
-                    st.stop()
+    # heat-map ---------------------------------------------------------
+    if df["date_time"].notna().any():
+        ts = pd.to_datetime(df["date_time"], errors="coerce")
+        heat_df = df.copy()
+        heat_df["date"] = ts.dt.date
+        heat_df["bucket"] = ts.apply(bucket_time)
 
-                # Run the asynchronous processing loop
-                results: List[ImageResult] = asyncio.run(
-                    process_images_async(files_data, rf_client)
+        agg = (
+            heat_df.groupby(["bucket", "date"], as_index=False)
+            .agg(buck=("buck_count", "sum"),
+                 deer=("deer_count", "sum"),
+                 doe=("doe_count", "sum"))
+        )
+        agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
+
+        buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
+        dates = sorted(agg["date"].unique())
+
+        z = [[int(agg.query("bucket==@b and date==@d")["activity"].sum())
+              for d in dates] for b in buckets]
+
+        sx, sy, ss, sc = [], [], [], []
+        for b in buckets:
+            for d in dates:
+                bk = int(agg.query("bucket==@b and date==@d")["buck"].sum())
+                if bk:
+                    sx.append(d); sy.append(b); ss.append(bk * 10 + 8); sc.append(bk)
+
+        heat = go.Heatmap(
+            z=z, x=dates, y=buckets,
+            colorscale=sequential.Blues,
+            colorbar=dict(title="Total Activity"),
+            hovertemplate="Date %{x}<br>%{y}<br>Activity %{z}<extra></extra>",
+        )
+        dots = go.Scatter(
+            x=sx, y=sy, mode="markers",
+            marker=dict(size=ss, color="#228B22", opacity=.85,
+                        line=dict(width=1, color="white")),
+            customdata=sc,  # buck count
+            hovertemplate="Date %{x}<br>%{y}<br>Bucks %{customdata}<extra></extra>",
+            showlegend=False,
+        )
+        fig_hm = go.Figure([heat, dots])
+        fig_hm.update_yaxes(autorange="reversed")
+        fig_hm.update_layout(
+            title=("Heat-map of Total Activity<br>"
+                   "<span style='font-size:0.8em'>(bubble size = buck count)</span>"),
+            xaxis_tickangle=-45, xaxis_type="category",
+            yaxis_title="Time of Day", xaxis_title="Date",
+        )
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+    # download ---------------------------------------------------------
+    csv = df.to_csv(index=False).encode()
+    st.download_button("Download revised CSV", csv, "deerlens_results.csv", "text/csv")
+
+    # gallery ----------------------------------------------------------
+    st.header("Annotated Images")
+    cats = categorise(results, df)
+    THUMB_W = 800
+
+    for cat_name in ["Buck", "Deer", "Doe", "No Tag"]:
+        imgs = cats.get(cat_name, [])
+        with st.expander(f"{cat_name} ({len(imgs)})", expanded=False):
+            if not imgs:
+                st.write("No images.")
+                continue
+            for res in imgs:
+                if not res.annotated_image:
+                    st.write(f"{res.file_name} (no annotated image)")
+                    continue
+                b64 = base64.b64encode(res.annotated_image).decode()
+                uri = f"data:image/jpeg;base64,{b64}"
+                st.components.v1.html(
+                    f"""
+                    <img src="{uri}" width="{THUMB_W}"
+                         title="{res.file_name}"
+                         style="margin:4px;border:1px solid #ddd;border-radius:4px;cursor:pointer;"
+                         onclick="
+                           const w = window.open('about:blank');
+                           w.document.write(`<img src='{uri}' style='width:100%;'>`);
+                         ">
+                    """,
+                    height=int(THUMB_W * .75) + 12,
+                    scrolling=False,
                 )
-
-                # Display errors (if any) at the top of the page
-                failed = [r for r in results if r.error]
-                if failed:
-                    error_messages = "\n".join(f"{r.file_name}: {r.error}" for r in failed)
-                    error_placeholder.warning(
-                        f"The following files could not be processed:\n{error_messages}"
-                    )
-
-                # Aggregate into a DataFrame
-                df = aggregate_results(results)
-
-                # Compute summary statistics
-                summary = compute_summary_stats(df)
-
-                # Show KPI metrics
-                st.header("Summary Metrics")
-                cols = st.columns(4)
-                cols[0].metric("Images Processed", summary["total_images"])
-                cols[1].metric("Buck Count", summary["total_buck"])
-                cols[2].metric("Deer Count", summary["total_deer"])
-                cols[3].metric("Doe Count", summary["total_doe"])
-
-                # Bar chart for total counts
-                fig = px.bar(
-                    x=["Buck", "Deer", "Doe"],
-                    y=[summary["total_buck"], summary["total_deer"], summary["total_doe"]],
-                    labels={"x": "Class", "y": "Count"},
-                    title="Total Counts by Class",
-                )
-                fig.update_layout(showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-
-                # ── Daily activity stacked bar chart ───────────────────────
-                st.header("Daily Activity (stacked by class)")
-
-                if df["date_time"].notna().any():
-                    dt_series = pd.to_datetime(df["date_time"], errors="coerce")
-                    df_dates = df.copy()
-                    df_dates["date"] = dt_series.dt.date
-
-                    agg = (
-                        df_dates.groupby("date", as_index=False)
-                        .agg(
-                            buck_count=("buck_count", "sum"),
-                            deer_count=("deer_count", "sum"),
-                            doe_count=("doe_count", "sum"),
-                        )
-                        .sort_values("date")
-                    )
-
-                    plot_df = agg.melt(
-                        id_vars="date",
-                        value_vars=["buck_count", "deer_count", "doe_count"],
-                        var_name="Class",
-                        value_name="Count",
-                    )
-                    plot_df["Class"] = (
-                        plot_df["Class"].str.replace("_count", "").str.title()
-                    )
-
-                    # custom color palette
-                    color_map = {
-                        "Buck": "#228B22",  # dark forest green
-                        "Doe":  "#FFC0CB",  # soft pink
-                        "Deer": "#D2B48C",  # beige-brown
-                    }
-
-                    fig_stacked = px.bar(
-                        plot_df,
-                        x="date",
-                        y="Count",
-                        color="Class",
-                        title="Activity by Date (Buck / Deer / Doe)",
-                        labels={"date": "Date"},
-                        color_discrete_map=color_map,
-                    )
-                    fig_stacked.update_layout(
-                        barmode="stack",
-                        xaxis_type="category",
-                        xaxis_tickangle=-45,
-                    )
-                    st.plotly_chart(fig_stacked, use_container_width=True)
-                else:
-                    st.info("No date metadata available to build chart.")
-
-               # ── Time-of-day activity heatmap ───────────────────────────
-                st.header("Activity by Time of Day")
-
-                if df["date_time"].notna().any():
-                    # helper → assign bucket label
-                    def tod_bucket(ts: pd.Timestamp | None) -> str | None:
-                        if pd.isna(ts):
-                            return None
-                        t = ts.time()
-                        mins = t.hour * 60 + t.minute
-                        if 360 <= mins <= 480:        # 06:00–08:00
-                            return "Dawn"
-                        elif 481 <= mins <= 660:      # 08:01–11:00
-                            return "Morning"
-                        elif 661 <= mins <= 960:      # 11:01–16:00
-                            return "Midday"
-                        elif 961 <= mins <= 1110:     # 16:01–18:30
-                            return "Afternoon"
-                        elif 1111 <= mins <= 1259:    # 18:31–20:59 ≈ evening twilight
-                            return "Evening"
-                        else:                         # 21:00–05:59
-                            return "Night"
-
-                    dt_series = pd.to_datetime(df["date_time"], errors="coerce")
-                    df_heat = df.copy()
-                    df_heat["date"] = dt_series.dt.date
-                    df_heat["bucket"] = dt_series.apply(tod_bucket)
-
-                    # sum counts per date+bucket
-                    agg = (
-                        df_heat.groupby(["bucket", "date"], as_index=False)
-                        .agg(
-                            buck=("buck_count", "sum"),
-                            deer=("deer_count", "sum"),
-                            doe=("doe_count", "sum"),
-                        )
-                    )
-                    agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
-
-                    bucket_order = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
-                    date_order = sorted(agg["date"].unique())
-
-                    # heatmap matrix
-                    z = [
-                        [
-                            int(
-                                agg.loc[
-                                    (agg.bucket == b) & (agg.date == d), "activity"
-                                ].sum()
-                            )
-                            for d in date_order
-                        ]
-                        for b in bucket_order
-                    ]
-
-                    # bubble overlay for bucks
-                    scatter_x, scatter_y, scatter_size, scatter_cnt = [], [], [], []
-                    for b in bucket_order:
-                        for d in date_order:
-                            bucks = int(
-                                agg.loc[(agg.bucket == b) & (agg.date == d), "buck"].sum()
-                            )
-                            if bucks > 0:
-                                scatter_x.append(d)
-                                scatter_y.append(b)
-                                scatter_size.append(bucks * 10 + 8)  # scale factor
-                                scatter_cnt.append(bucks)
-
-                    fig_heat = go.Figure(
-                        data=[
-                            go.Heatmap(
-                                z=z,
-                                x=date_order,
-                                y=bucket_order,
-                                colorscale=sequential.Blues,
-                                colorbar=dict(title="Total Activity"),
-                                hovertemplate="Date: %{x}<br>Bucket: %{y}<br>Activity: %{z}<extra></extra>",
-                            ),
-                            go.Scatter(
-                                x=scatter_x,
-                                y=scatter_y,
-                                mode="markers",
-                                marker=dict(
-                                    size=scatter_size,
-                                    color="#228B22",
-                                    opacity=0.85,
-                                    line=dict(width=1, color="white"),
-                                ),
-                                customdata=scatter_cnt,
-                                hovertemplate="Date: %{x}<br>Bucket: %{y}<br>Bucks: %{customdata}<extra></extra>",
-                                showlegend=False,
-                            ),
-                        ]
-                    )
-                    fig_heat.update_yaxes(autorange="reversed")
-                    fig_heat.update_layout(
-                        barmode="stack",
-                        yaxis_title="Time of Day",
-                        xaxis_title="Date",
-                        title=(
-                            "Heatmap of Deer + Doe + Buck Activity<br>"
-                            "<span style='font-size:0.8em'>(bubble size = buck count)</span>"
-                        ),
-                        xaxis_type="category",
-                        xaxis_tickangle=-45,
-                    )
-                    st.plotly_chart(fig_heat, use_container_width=True)
-                else:
-                    st.info("No timestamp data available for heatmap.")
-
-                # CSV download button
-                csv = df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download results as CSV",
-                    data=csv,
-                    file_name="deerlens_results.csv",
-                    mime="text/csv",
-                )
-
-                # ── Annotated image gallery ────────────────────────────────
-                st.header("Annotated Images")
-
-                THUMB_W = 800  # fixed thumbnail width
-                categories = categorise_results(results)
-
-                for category_name in ["Buck", "Deer", "Doe", "No Tag"]:
-                    images = categories.get(category_name, [])
-                    with st.expander(f"{category_name} ({len(images)})", expanded=False):
-                        if not images:
-                            st.write("No images in this category.")
-                            continue
-
-                        for res in images:
-                            if not res.annotated_image:
-                                st.write(f"{res.file_name} (no annotated image)")
-                                continue
-
-                            # Convert JPEG bytes to a data URI
-                            b64 = base64.b64encode(res.annotated_image).decode()
-                            uri = f"data:image/jpeg;base64,{b64}"
-                            title = f"{res.file_name} | {res.date_time or 'Unknown'}"
-
-                            # Streamlit `html` component to render thumbnail + JS click handler
-                            st.components.v1.html(
-                                f"""
-                                <img src="{uri}"
-                                     width="{THUMB_W}"
-                                     title="{title}"
-                                     style="margin:4px;border:1px solid #ddd;border-radius:4px;cursor:pointer;"
-                                     onclick="
-                                       const w = window.open('about:blank');
-                                       w.document.write(`<img src='{uri}' style='width:100%;'>`);
-                                     ">
-                                """,
-                                height=int(THUMB_W * 0.75) + 12,  # enough for one row
-                                scrolling=False,
-                            )
