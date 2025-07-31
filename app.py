@@ -16,6 +16,7 @@ import base64
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import io                       # gives io.StringIO
 import aiohttp
 import pandas as pd
 import plotly.express as px
@@ -337,8 +338,29 @@ if "edited_df" in st.session_state:
         st.plotly_chart(fig_hm, use_container_width=True)
 
     # download ---------------------------------------------------------
-    csv = df.to_csv(index=False).encode()
-    st.download_button("Download revised CSV", csv, "deerlens_results.csv", "text/csv")
+    # 1) summary → DataFrame
+    summary_df = pd.DataFrame(
+        [
+            {"metric": "total_images", "value": smry["total_images"]},
+            {"metric": "total_buck",   "value": smry["total_buck"]},
+            {"metric": "total_deer",   "value": smry["total_deer"]},
+            {"metric": "total_doe",    "value": smry["total_doe"]},
+        ]
+    )
+
+    # 2) build one CSV: summary, blank line, detailed rows
+    buf = io.StringIO()
+    summary_df.to_csv(buf, index=False)
+    buf.write("\n")                 # visual separator
+    df.to_csv(buf, index=False)
+    csv_bytes = buf.getvalue().encode("utf-8")
+
+    st.download_button(
+        "Download revised CSV (+ summary)",
+        csv_bytes,
+        "deerlens_results.csv",
+        "text/csv",
+    )
 
     # gallery ----------------------------------------------------------
     st.header("Annotated Images")
