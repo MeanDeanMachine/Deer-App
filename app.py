@@ -355,17 +355,17 @@ if "edited_df" in st.session_state:
                 col_img, col_edit = st.columns([3, 2])
 
                 with col_img:
-                    st.components.v1.html(
-                        f"""
-                        <div style="text-align:center">
-                          <img src="{uri}" width="{THUMB_W}"
-                               style="margin:4px;border:1px solid #ddd;border-radius:4px;cursor:pointer;"
-                               onclick="const w=window.open('about:blank');w.document.write(`<img src='{uri}' style='width:100%;'>`);">
-                          <div style="font-weight:bold;margin-bottom:4px">{res.file_name}</div>
-                        </div>
-                        """,
-                        height=int(THUMB_W * 0.75) + 60,
-                        scrolling=False,
+                    # thumbnail + caption
+                    st.image(
+                        res.annotated_image,
+                        width=THUMB_W,
+                        caption=res.file_name,
+                        output_format="JPEG",
+                    )
+                    # click-to-zoom link (uses same bytes, no extra copy)
+                    st.markdown(
+                        f"[🔍 Open full size]({uri})",
+                        unsafe_allow_html=True,
                     )
 
                 with col_edit:
