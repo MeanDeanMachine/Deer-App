@@ -322,12 +322,10 @@ if uploaded_files:
                 st.header("Daily Activity (stacked by class)")
 
                 if df["date_time"].notna().any():
-                    # Extract just YYYY-MM-DD
                     dt_series = pd.to_datetime(df["date_time"], errors="coerce")
                     df_dates = df.copy()
                     df_dates["date"] = dt_series.dt.date
 
-                    # Sum counts per date
                     agg = (
                         df_dates.groupby("date", as_index=False)
                         .agg(
@@ -335,17 +333,25 @@ if uploaded_files:
                             deer_count=("deer_count", "sum"),
                             doe_count=("doe_count", "sum"),
                         )
-                        .sort_values("date")          # chronological order
+                        .sort_values("date")
                     )
 
-                    # Reshape for stacked bar
                     plot_df = agg.melt(
                         id_vars="date",
                         value_vars=["buck_count", "deer_count", "doe_count"],
                         var_name="Class",
                         value_name="Count",
                     )
-                    plot_df["Class"] = plot_df["Class"].str.replace("_count", "").str.title()
+                    plot_df["Class"] = (
+                        plot_df["Class"].str.replace("_count", "").str.title()
+                    )
+
+                    # custom color palette
+                    color_map = {
+                        "Buck": "#228B22",  # dark forest green
+                        "Doe":  "#FFC0CB",  # soft pink
+                        "Deer": "#D2B48C",  # beige-brown
+                    }
 
                     fig_stacked = px.bar(
                         plot_df,
@@ -354,6 +360,7 @@ if uploaded_files:
                         color="Class",
                         title="Activity by Date (Buck / Deer / Doe)",
                         labels={"date": "Date"},
+                        color_discrete_map=color_map,
                     )
                     fig_stacked.update_layout(
                         barmode="stack",
