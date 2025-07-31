@@ -377,10 +377,18 @@ if "edited_df" in st.session_state:
                         caption=res.file_name,
                         output_format="JPEG",
                     )
-                    # click-to-zoom link (uses same bytes, no extra copy)
-                    st.markdown(
-                        f"[🔍 Open full size]({uri})",
-                        unsafe_allow_html=True,
+
+                    # click-to-zoom (opens image inside about:blank)
+                    st.components.v1.html(
+                        f"""
+                        <a href="#" onclick="
+                             const w = window.open('about:blank');
+                             w.document.write(`<img src='{uri}' style='width:100%;'>`);
+                             return false;
+                        ">🔍 Open full size</a>
+                        """,
+                        height=24,
+                        scrolling=False,
                     )
 
                 with col_edit:
