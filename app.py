@@ -365,7 +365,9 @@ if "edited_df" in st.session_state:
         "deerlens_results.csv",
         "text/csv",
     )
-
+    # remember the last category pane the user opened
+    if "open_cat" not in st.session_state:
+        st.session_state.open_cat = None
     # gallery ----------------------------------------------------------
     st.header("Annotated Images")
 
@@ -374,7 +376,20 @@ if "edited_df" in st.session_state:
 
     for cat_name in ["Buck", "Deer", "Doe", "No Tag"]:
         imgs = cats.get(cat_name, [])
-        with st.expander(f"{cat_name} ({len(imgs)})", expanded=False):
+
+        # sort by date_time (earliest first)
+        imgs = sorted(
+             imgs,
+             key=lambda r: pd.to_datetime(r.date_time, errors="coerce")
+        )
+               
+        # remember if this pane should be open on rerun
+        expanded_now = st.session_state.open_cat == cat_name
+        with st.expander(f"{cat_name} ({len(imgs)})", expanded=expanded_now):
+            # keep this pane open after user clicks inside it
+            if st.session_state.open_cat != cat_name:
+                st.session_state.open_cat = cat_name
+
             if not imgs:
                 st.write("No images.")
                 continue
@@ -419,21 +434,25 @@ if "edited_df" in st.session_state:
 
                 with col_edit:
                     st.markdown("**Override counts**")
-                    buck_val = st.number_input(
-                        "Buck", min_value=0, value=int(row.buck_count),
-                        key=f"buck_{res.file_name}"
-                    )
-                    deer_val = st.number_input(
-                        "Deer", min_value=0, value=int(row.deer_count),
-                        key=f"deer_{res.file_name}"
-                    )
-                    doe_val = st.number_input(
-                        "Doe", min_value=0, value=int(row.doe_count),
-                        key=f"doe_{res.file_name}"
-                    )
 
-                    # commit the edits to session_state.edited_df
-                    st.session_state.edited_df.loc[
-                        st.session_state.edited_df["file_name"] == res.file_name,
-                        ["buck_count", "deer_count", "doe_count"],
-                    ] = [buck_val, deer_val, doe_val]
+                    # ------------- inline form ---------------------------
+                    with st.form(key=f"form_{res.file_name}", clear_on_submit=False):
+                        buck_val = st.number_input(
+                            "Buck", min_value=0, value=int(row.buck_count)
+                        )
+                        deer_val = st.number_input(
+                            "Deer", min_value=0, value=int(row.deer_count)
+                        )
+                        doe_val = st.number_input(
+                            "Doe", min_value=0, value=int(row.doe_count)
+                        )
+                        submitted = st.form_submit_button(
+                            "Save", use_container_width=True
+                        )
+
+                    # apply edits when user clicks Save
+                    if submitted:
+                        st.session_state.edited_df.loc[
+                            st.session_state.edited_df["file_name"] == res.file_name,
+                            ["buck_count", "deer_count", "doe_count"],
+                        ] = [buck_val, deer_val, doe_val]
