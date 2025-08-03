@@ -100,13 +100,17 @@ async def process_images_async(
     """Concurrently process many images."""
     results, processed, total = [], 0, len(files)
     bar = st.progress(0)
-    sem = asyncio.Semaphore(5)
+    sem = asyncio.Semaphore(2)
 
     async with aiohttp.ClientSession() as session:
 
         async def task(name: str, data: bytes) -> ImageResult:
             async with sem:
-                return await _process_single(session, rf_client, name, data)
+                try:       
+                    return await _process_single(session, rf_client, name, data)
+                finally:
+                   # free the raw upload immediately
+                    del data
 
         tasks = [task(n, b) for n, b in files]
         for fut in asyncio.as_completed(tasks):
