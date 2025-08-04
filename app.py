@@ -100,7 +100,7 @@ async def process_images_async(
     """Concurrently process many images."""
     results, processed, total = [], 0, len(files)
     bar = st.progress(0)
-    sem = asyncio.Semaphore(2)
+    sem = asyncio.Semaphore(3)
 
     async with aiohttp.ClientSession() as session:
 
