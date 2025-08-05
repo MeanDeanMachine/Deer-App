@@ -472,4 +472,4 @@ if "edited_df" in st.session_state:
                             st.session_state.edited_df["file_name"] == res.file_name,
                             ["buck_count", "deer_count", "doe_count", "direction"],
                         ] = [buck_val, deer_val, doe_val, dir_clean]
-                        st.experimental_rerun()
+                        st.rerun()
