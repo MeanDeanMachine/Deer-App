@@ -266,25 +266,27 @@ if "edited_df" in st.session_state:
     # remember the last category pane the user opened
     if "open_cat" not in st.session_state:
         st.session_state.open_cat = None
-    # gallery ----------------------------------------------------------
-    st.header("Annotated Images")
+# gallery -------------------------------------------------------------
+st.header("Annotated Images")
 
-    THUMB_W = 800
-    cats = categorise(results, st.session_state.edited_df)
+THUMB_W = 800
+cats = categorise(results, st.session_state.edited_df)
+
+# ▒▒▒ bulk-edit form ▒▒▒
+with st.form("bulk_overrides", clear_on_submit=False):
 
     for cat_name in ["Buck", "Deer", "Doe", "No Tag"]:
         imgs = cats.get(cat_name, [])
 
         # sort by date_time (earliest first)
         imgs = sorted(
-             imgs,
-             key=lambda r: pd.to_datetime(r.date_time, errors="coerce")
+            imgs,
+            key=lambda r: pd.to_datetime(r.date_time, errors="coerce")
         )
-               
+
         # remember if this pane should be open on rerun
         expanded_now = st.session_state.open_cat == cat_name
         with st.expander(f"{cat_name} ({len(imgs)})", expanded=expanded_now):
-            # keep this pane open after user clicks inside it
             if st.session_state.open_cat != cat_name:
                 st.session_state.open_cat = cat_name
 
@@ -297,27 +299,23 @@ if "edited_df" in st.session_state:
                     st.write(f"{res.file_name} (no annotated image)")
                     continue
 
-                # ------------- thumbnail ---------------------------------
+                # ---------- thumbnail & overrides ---------------------
                 b64 = base64.b64encode(res.annotated_image).decode()
                 uri = f"data:image/jpeg;base64,{b64}"
 
-                # current counts from edited_df
                 row = st.session_state.edited_df.loc[
                     st.session_state.edited_df["file_name"] == res.file_name
                 ].iloc[0]
 
-                col_img, col_edit = st.columns([3, 2])
+                col_img, col_edit = st.columns([3, 2], gap="small")
 
                 with col_img:
-                    # thumbnail + caption
                     st.image(
                         res.annotated_image,
                         width=THUMB_W,
                         caption=res.file_name,
                         output_format="JPEG",
                     )
-
-                    # click-to-zoom (opens image inside about:blank)
                     st.components.v1.html(
                         f"""
                         <a href="#" onclick="
@@ -333,45 +331,48 @@ if "edited_df" in st.session_state:
                 with col_edit:
                     st.markdown("**Manual overrides**")
 
-                    dir_options = DIRECTIONS[1:]
+                    dir_opts = DIRECTIONS[1:]
                     current_dir = row.direction if pd.notna(row.direction) else ""
 
-                    with st.form(key=f"form_{res.file_name}", clear_on_submit=False):
-                        buck_val = st.number_input(
-                            "Buck", min_value=0, value=int(row.buck_count),
-                            key=f"buck_{res.file_name}"
-                        )
-                        deer_val = st.number_input(
-                            "Deer", min_value=0, value=int(row.deer_count),
-                            key=f"deer_{res.file_name}"
-                        )
-                        doe_val  = st.number_input(
-                            "Doe",  min_value=0, value=int(row.doe_count),
-                            key=f"doe_{res.file_name}"
-                        )
-                        dir_val = st.selectbox(
-                            "Direction (optional)",
-                            options=["—"] + dir_options,
-                            index=(dir_options.index(current_dir) + 1) if current_dir else 0,
-                            key=f"dir_{res.file_name}",
-                        )
-                        submitted = st.form_submit_button("Save", use_container_width=True)
+                    st.number_input(
+                        "Buck", min_value=0, value=int(row.buck_count),
+                        key=f"buck_{res.file_name}"
+                    )
+                    st.number_input(
+                        "Deer", min_value=0, value=int(row.deer_count),
+                        key=f"deer_{res.file_name}"
+                    )
+                    st.number_input(
+                        "Doe",  min_value=0, value=int(row.doe_count),
+                        key=f"doe_{res.file_name}"
+                    )
+                    st.selectbox(
+                        "Direction (optional)",
+                        options=["—"] + dir_opts,
+                        index=(dir_opts.index(current_dir) + 1) if current_dir else 0,
+                        key=f"dir_{res.file_name}",
+                    )
 
-                    # apply ALL pending edits when *any* Save is clicked
-                    if submitted:
-                        for fname in st.session_state.edited_df["file_name"]:
-                            b  = st.session_state.get(f"buck_{fname}", 0)
-                            d  = st.session_state.get(f"deer_{fname}", 0)
-                            do = st.session_state.get(f"doe_{fname}", 0)
-                            dr = st.session_state.get(f"dir_{fname}", "—")
-                            dr_clean = None if dr == "—" else dr
+    # ♦♦ single button – submits all edits ♦♦
+    save_all = st.form_submit_button("Apply ALL overrides", type="primary")
 
-                            st.session_state.edited_df.loc[
-                                st.session_state.edited_df["file_name"] == fname,
-                                ["buck_count", "deer_count", "doe_count", "direction"],
-                            ] = [b, d, do, dr_clean]
+# --------------------------------------------------------------------
+# After form submit: commit every widget value into edited_df
+# --------------------------------------------------------------------
+if save_all:
+    for fname in st.session_state.edited_df["file_name"]:
+        b  = st.session_state.get(f"buck_{fname}", 0)
+        d  = st.session_state.get(f"deer_{fname}", 0)
+        do = st.session_state.get(f"doe_{fname}", 0)
+        dr = st.session_state.get(f"dir_{fname}", "—")
+        dr_clean = None if dr == "—" else dr
 
-                        st.rerun()    # refresh metrics, charts, CSV
+        st.session_state.edited_df.loc[
+            st.session_state.edited_df["file_name"] == fname,
+            ["buck_count", "deer_count", "doe_count", "direction"],
+        ] = [b, d, do, dr_clean]
+
+    st.rerun()   # refresh metrics, charts, CSV
 
 # ──────────────────────────────────────────────────────────────────
 # 🔄  Refresh KPI, charts, and CSV  (runs after any inline edits) 🔄
