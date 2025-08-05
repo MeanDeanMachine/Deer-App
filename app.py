@@ -363,7 +363,7 @@ if "edited_df" in st.session_state:
     buf = io.StringIO()
     summary_df.to_csv(buf, index=False)
     buf.write("\n")                 # visual separator
-    df.to_csv(buf, index=False)
+    st.session_state["edited_df"].to_csv(buf, index=False)
     csv_bytes = buf.getvalue().encode("utf-8")
 
     st.download_button(
@@ -472,3 +472,4 @@ if "edited_df" in st.session_state:
                             st.session_state.edited_df["file_name"] == res.file_name,
                             ["buck_count", "deer_count", "doe_count", "direction"],
                         ] = [buck_val, deer_val, doe_val, dir_clean]
+                        st.experimental_rerun()
