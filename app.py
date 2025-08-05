@@ -31,6 +31,11 @@ from exif_utils import extract_datetime_original
 from roboflow_client import RoboflowClient
 
 # ──────────────────────────────────────────────────────────────────────
+# Constants
+# ──────────────────────────────────────────────────────────────────────
+DIRECTIONS = ["", "N", "NE", "E", "SE", "S", "SW", "W", "NW"]  # "" = no entry
+
+# ──────────────────────────────────────────────────────────────────────
 # Data structures
 # ──────────────────────────────────────────────────────────────────────
 @dataclass
@@ -41,6 +46,7 @@ class ImageResult:
     deer_count: int
     doe_count: int
     annotated_image: bytes
+    direction: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -135,6 +141,7 @@ def to_dataframe(results: List[ImageResult]) -> pd.DataFrame:
                 buck_count=r.buck_count,
                 deer_count=r.deer_count,
                 doe_count=r.doe_count,
+                direction=r.direction
             )
             for r in results
         ]
@@ -433,9 +440,11 @@ if "edited_df" in st.session_state:
                     )
 
                 with col_edit:
-                    st.markdown("**Override counts**")
+                    st.markdown("**Manual overrides**")
 
                     # ------------- inline form ---------------------------
+                    dir_options = DIRECTIONS[1:]                             # exclude blank sentinel
+                    current_dir = row.direction if pd.notna(row.direction) else ""
                     with st.form(key=f"form_{res.file_name}", clear_on_submit=False):
                         buck_val = st.number_input(
                             "Buck", min_value=0, value=int(row.buck_count)
@@ -446,13 +455,20 @@ if "edited_df" in st.session_state:
                         doe_val = st.number_input(
                             "Doe", min_value=0, value=int(row.doe_count)
                         )
+                        dir_val = st.selectbox(
+                            "Direction (optional)",
+                            options=["—"] + dir_options,
+                            index=(dir_options.index(current_dir) + 1) if current_dir else 0,
+                            key=f"dir_{res.file_name}",
+                        )
                         submitted = st.form_submit_button(
                             "Save", use_container_width=True
                         )
 
                     # apply edits when user clicks Save
                     if submitted:
+                        dir_clean = None if dir_val == "—" else dir_val
                         st.session_state.edited_df.loc[
                             st.session_state.edited_df["file_name"] == res.file_name,
-                            ["buck_count", "deer_count", "doe_count"],
-                        ] = [buck_val, deer_val, doe_val]
+                            ["buck_count", "deer_count", "doe_count", "direction"],
+                        ] = [buck_val, deer_val, doe_val, dir_clean]
