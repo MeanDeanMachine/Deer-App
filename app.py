@@ -259,13 +259,7 @@ if "edited_df" in st.session_state:
         df = edited  # refresh local reference
 
     # KPI cards --------------------------------------------------------
-    smry = compute_summary(df)
-    st.header("Summary Metrics")
-    col = st.columns(4)
-    col[0].metric("Images", smry["total_images"])
-    col[1].metric("Buck", smry["total_buck"])
-    col[2].metric("Deer", smry["total_deer"])
-    col[3].metric("Doe", smry["total_doe"])
+    kpi_container = st.empty()
 
     # stacked bar ------------------------------------------------------
     if df["date_time"].notna().any():
@@ -473,3 +467,41 @@ if "edited_df" in st.session_state:
                             ["buck_count", "deer_count", "doe_count", "direction"],
                         ] = [buck_val, deer_val, doe_val, dir_clean]
                         st.rerun()
+# ──────────────────────────────────────────────────────────────────
+#  🔄  Refresh KPI cards & build up-to-date CSV  🔄
+#      (runs after gallery so it always has the newest edits)
+# ──────────────────────────────────────────────────────────────────
+df_final   = st.session_state["edited_df"]
+smry_final = compute_summary(df_final)
+
+# --- repopulate KPI container ------------------------------------
+with kpi_container:
+    st.header("Summary Metrics")
+    cols = st.columns(4)
+    cols[0].metric("Images", smry_final["total_images"])
+    cols[1].metric("Buck",   smry_final["total_buck"])
+    cols[2].metric("Deer",   smry_final["total_deer"])
+    cols[3].metric("Doe",    smry_final["total_doe"])
+
+# --- build CSV (summary + detailed rows) -------------------------
+summary_df = pd.DataFrame(
+    [
+        {"metric": "total_images", "value": smry_final["total_images"]},
+        {"metric": "total_buck",   "value": smry_final["total_buck"]},
+        {"metric": "total_deer",   "value": smry_final["total_deer"]},
+        {"metric": "total_doe",    "value": smry_final["total_doe"]},
+    ]
+)
+
+buf = io.StringIO()
+summary_df.to_csv(buf, index=False)
+buf.write("\n")                      # visual separator
+df_final.to_csv(buf, index=False)
+csv_bytes = buf.getvalue().encode("utf-8")
+
+st.download_button(
+    "Download revised CSV (+ summary)",
+    csv_bytes,
+    "deerlens_results.csv",
+    "text/csv",
+)
