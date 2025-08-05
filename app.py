@@ -367,121 +367,122 @@ if "edited_df" in st.session_state:
 # ──────────────────────────────────────────────────────────────────
 # 🔄  Refresh KPI, charts, and CSV  (runs after any inline edits) 🔄
 # ──────────────────────────────────────────────────────────────────
-df_final   = st.session_state["edited_df"]
-smry_final = compute_summary(df_final)
+if "edited_df" in st.session_state:          # guard for first page load
+    df_final   = st.session_state["edited_df"]
+    smry_final = compute_summary(df_final)
 
-# ----- KPI cards ----------------------------------------------------
-with kpi_container:
-    st.header("Summary Metrics")
-    k = st.columns(4)
-    k[0].metric("Images", smry_final["total_images"])
-    k[1].metric("Buck",   smry_final["total_buck"])
-    k[2].metric("Deer",   smry_final["total_deer"])
-    k[3].metric("Doe",    smry_final["total_doe"])
+    # ----- KPI cards ------------------------------------------------
+    with kpi_container:
+        st.header("Summary Metrics")
+        k = st.columns(4)
+        k[0].metric("Images", smry_final["total_images"])
+        k[1].metric("Buck",   smry_final["total_buck"])
+        k[2].metric("Deer",   smry_final["total_deer"])
+        k[3].metric("Doe",    smry_final["total_doe"])
 
-# ----- Charts -------------------------------------------------------
-with charts_container:
-    # stacked bar
-    if df_final["date_time"].notna().any():
-        dt = pd.to_datetime(df_final["date_time"], errors="coerce")
-        bar_df = df_final.copy()
-        bar_df["date"] = dt.dt.date
-        agg = (
-            bar_df.groupby("date", as_index=False)
-            .sum(numeric_only=True)
-            .sort_values("date")
+    # ----- Charts ---------------------------------------------------
+    with charts_container:
+        # stacked bar
+        if df_final["date_time"].notna().any():
+            dt = pd.to_datetime(df_final["date_time"], errors="coerce")
+            bar_df = df_final.copy()
+            bar_df["date"] = dt.dt.date
+            agg = (
+                bar_df.groupby("date", as_index=False)
+                .sum(numeric_only=True)
+                .sort_values("date")
+            )
+            melt = agg.melt("date", ["buck_count", "deer_count", "doe_count"],
+                            var_name="Class", value_name="Count")
+            melt["Class"] = melt["Class"].str.replace("_count", "").str.title()
+            fig_bar = px.bar(
+                melt,
+                x="date",
+                y="Count",
+                color="Class",
+                color_discrete_map={
+                    "Buck": "#228B22",
+                    "Doe":  "#FFC0CB",
+                    "Deer": "#D2B48C",
+                },
+                title="Activity by Date (stacked)",
+                labels={"date": "Date"},
+            )
+            fig_bar.update_layout(barmode="stack", xaxis_tickangle=-45)
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        # heat-map
+        if df_final["date_time"].notna().any():
+            ts = pd.to_datetime(df_final["date_time"], errors="coerce")
+            heat_df = df_final.copy()
+            heat_df["date"]   = ts.dt.date
+            heat_df["bucket"] = ts.apply(bucket_time)
+
+            agg = (
+                heat_df.groupby(["bucket", "date"], as_index=False)
+                .agg(buck=("buck_count", "sum"),
+                     deer=("deer_count", "sum"),
+                     doe=("doe_count", "sum"))
+            )
+            agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
+
+            buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
+            dates   = sorted(agg["date"].unique())
+
+            z = [[int(agg.query("bucket==@b and date==@d")["activity"].sum())
+                  for d in dates] for b in buckets]
+
+            sx, sy, ss, sc = [], [], [], []
+            for b in buckets:
+                for d in dates:
+                    bk = int(agg.query("bucket==@b and date==@d")["buck"].sum())
+                    if bk:
+                        sx.append(d); sy.append(b); ss.append(bk * 10 + 8); sc.append(bk)
+
+            heat = go.Heatmap(
+                z=z, x=dates, y=buckets,
+                colorscale=sequential.Blues,
+                colorbar=dict(title="Total Activity"),
+                hovertemplate="Date %{x}<br>%{y}<br>Activity %{z}<extra></extra>",
+            )
+            dots = go.Scatter(
+                x=sx, y=sy, mode="markers",
+                marker=dict(size=ss, color="#228B22", opacity=.85,
+                            line=dict(width=1, color="white")),
+                customdata=sc,
+                hovertemplate="Date %{x}<br>%{y}<br>Bucks %{customdata}<extra></extra>",
+                showlegend=False,
+            )
+            fig_hm = go.Figure([heat, dots])
+            fig_hm.update_yaxes(autorange="reversed")
+            fig_hm.update_layout(
+                title=("Heat-map of Total Activity<br>"
+                       "<span style='font-size:0.8em'>(bubble size = buck count)</span>"),
+                xaxis_tickangle=-45, xaxis_type="category",
+                yaxis_title="Time of Day", xaxis_title="Date",
+            )
+            st.plotly_chart(fig_hm, use_container_width=True)
+
+    # ----- CSV download --------------------------------------------
+    with download_container:
+        summary_df = pd.DataFrame(
+            [
+                {"metric": "total_images", "value": smry_final["total_images"]},
+                {"metric": "total_buck",   "value": smry_final["total_buck"]},
+                {"metric": "total_deer",   "value": smry_final["total_deer"]},
+                {"metric": "total_doe",    "value": smry_final["total_doe"]},
+            ]
         )
-        melt = agg.melt("date", ["buck_count", "deer_count", "doe_count"],
-                        var_name="Class", value_name="Count")
-        melt["Class"] = melt["Class"].str.replace("_count", "").str.title()
-        fig_bar = px.bar(
-            melt,
-            x="date",
-            y="Count",
-            color="Class",
-            color_discrete_map={
-                "Buck": "#228B22",
-                "Doe":  "#FFC0CB",
-                "Deer": "#D2B48C",
-            },
-            title="Activity by Date (stacked)",
-            labels={"date": "Date"},
+
+        buf = io.StringIO()
+        summary_df.to_csv(buf, index=False)
+        buf.write("\n")
+        df_final.to_csv(buf, index=False)
+        csv_bytes = buf.getvalue().encode("utf-8")
+
+        st.download_button(
+            "Download revised CSV (+ summary)",
+            csv_bytes,
+            "deerlens_results.csv",
+            "text/csv",
         )
-        fig_bar.update_layout(barmode="stack", xaxis_tickangle=-45)
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    # heat-map
-    if df_final["date_time"].notna().any():
-        ts = pd.to_datetime(df_final["date_time"], errors="coerce")
-        heat_df = df_final.copy()
-        heat_df["date"]   = ts.dt.date
-        heat_df["bucket"] = ts.apply(bucket_time)
-
-        agg = (
-            heat_df.groupby(["bucket", "date"], as_index=False)
-            .agg(buck=("buck_count", "sum"),
-                 deer=("deer_count", "sum"),
-                 doe=("doe_count", "sum"))
-        )
-        agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
-
-        buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
-        dates   = sorted(agg["date"].unique())
-
-        z = [[int(agg.query("bucket==@b and date==@d")["activity"].sum())
-              for d in dates] for b in buckets]
-
-        sx, sy, ss, sc = [], [], [], []
-        for b in buckets:
-            for d in dates:
-                bk = int(agg.query("bucket==@b and date==@d")["buck"].sum())
-                if bk:
-                    sx.append(d); sy.append(b); ss.append(bk * 10 + 8); sc.append(bk)
-
-        heat = go.Heatmap(
-            z=z, x=dates, y=buckets,
-            colorscale=sequential.Blues,
-            colorbar=dict(title="Total Activity"),
-            hovertemplate="Date %{x}<br>%{y}<br>Activity %{z}<extra></extra>",
-        )
-        dots = go.Scatter(
-            x=sx, y=sy, mode="markers",
-            marker=dict(size=ss, color="#228B22", opacity=.85,
-                        line=dict(width=1, color="white")),
-            customdata=sc,
-            hovertemplate="Date %{x}<br>%{y}<br>Bucks %{customdata}<extra></extra>",
-            showlegend=False,
-        )
-        fig_hm = go.Figure([heat, dots])
-        fig_hm.update_yaxes(autorange="reversed")
-        fig_hm.update_layout(
-            title=("Heat-map of Total Activity<br>"
-                   "<span style='font-size:0.8em'>(bubble size = buck count)</span>"),
-            xaxis_tickangle=-45, xaxis_type="category",
-            yaxis_title="Time of Day", xaxis_title="Date",
-        )
-        st.plotly_chart(fig_hm, use_container_width=True)
-
-# ----- CSV download -------------------------------------------------
-with download_container:
-    summary_df = pd.DataFrame(
-        [
-            {"metric": "total_images", "value": smry_final["total_images"]},
-            {"metric": "total_buck",   "value": smry_final["total_buck"]},
-            {"metric": "total_deer",   "value": smry_final["total_deer"]},
-            {"metric": "total_doe",    "value": smry_final["total_doe"]},
-        ]
-    )
-
-    buf = io.StringIO()
-    summary_df.to_csv(buf, index=False)
-    buf.write("\n")
-    df_final.to_csv(buf, index=False)
-    csv_bytes = buf.getvalue().encode("utf-8")
-
-    st.download_button(
-        "Download revised CSV (+ summary)",
-        csv_bytes,
-        "deerlens_results.csv",
-        "text/csv",
-    )
