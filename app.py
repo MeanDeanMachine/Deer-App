@@ -333,37 +333,48 @@ if "edited_df" in st.session_state:
                 with col_edit:
                     st.markdown("**Manual overrides**")
 
-                    # ------------- inline form ---------------------------
-                    dir_options = DIRECTIONS[1:]                             # exclude blank sentinel
-                    current_dir = row.direction if pd.notna(row.direction) else ""
-                    with st.form(key=f"form_{res.file_name}", clear_on_submit=False):
-                        buck_val = st.number_input(
-                            "Buck", min_value=0, value=int(row.buck_count)
-                        )
-                        deer_val = st.number_input(
-                            "Deer", min_value=0, value=int(row.deer_count)
-                        )
-                        doe_val = st.number_input(
-                            "Doe", min_value=0, value=int(row.doe_count)
-                        )
-                        dir_val = st.selectbox(
-                            "Direction (optional)",
-                            options=["—"] + dir_options,
-                            index=(dir_options.index(current_dir) + 1) if current_dir else 0,
-                            key=f"dir_{res.file_name}",
-                        )
-                        submitted = st.form_submit_button(
-                            "Save", use_container_width=True
-                        )
+                # ------------- inline form ---------------------------
+                dir_options = DIRECTIONS[1:]                       # exclude blank sentinel
+                current_dir = row.direction if pd.notna(row.direction) else ""
 
-                    # apply edits when user clicks Save
-                    if submitted:
-                        dir_clean = None if dir_val == "—" else dir_val
+                with st.form(key=f"form_{res.file_name}", clear_on_submit=False):
+                    # widget keys keep values globally so any Save can access them
+                    buck_val = st.number_input(
+                        "Buck", min_value=0, value=int(row.buck_count),
+                        key=f"buck_{res.file_name}"
+                    )
+                    deer_val = st.number_input(
+                        "Deer", min_value=0, value=int(row.deer_count),
+                        key=f"deer_{res.file_name}"
+                    )
+                    doe_val  = st.number_input(
+                        "Doe",  min_value=0, value=int(row.doe_count),
+                        key=f"doe_{res.file_name}"
+                    )
+                    dir_val = st.selectbox(
+                        "Direction (optional)",
+                        options=["—"] + dir_options,
+                        index=(dir_options.index(current_dir) + 1) if current_dir else 0,
+                        key=f"dir_{res.file_name}",
+                    )
+                    submitted = st.form_submit_button("Save", use_container_width=True)
+
+                # apply ALL pending edits when *any* Save is clicked
+                if submitted:
+                    for fname in st.session_state.edited_df["file_name"].tolist():
+                        b  = st.session_state.get(f"buck_{fname}", 0)
+                        d  = st.session_state.get(f"deer_{fname}", 0)
+                        do = st.session_state.get(f"doe_{fname}", 0)
+                        dr = st.session_state.get(f"dir_{fname}", "—")
+                        dr_clean = None if dr == "—" else dr
+
                         st.session_state.edited_df.loc[
-                            st.session_state.edited_df["file_name"] == res.file_name,
+                            st.session_state.edited_df["file_name"] == fname,
                             ["buck_count", "deer_count", "doe_count", "direction"],
-                        ] = [buck_val, deer_val, doe_val, dir_clean]
-                        st.rerun()
+                        ] = [b, d, do, dr_clean]
+
+                    st.rerun()   # refresh metrics, charts, CSV
+
 # ──────────────────────────────────────────────────────────────────
 # 🔄  Refresh KPI, charts, and CSV  (runs after any inline edits) 🔄
 # ──────────────────────────────────────────────────────────────────
