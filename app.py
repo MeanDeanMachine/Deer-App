@@ -522,9 +522,10 @@ if "edited_df" in st.session_state:          # guard for first page load
                 yaxis_title="Time of Day", xaxis_title="Date",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
+            st.session_state["fig_hm"] = fig_hm  # store for export
             st.plotly_chart(fig_hm, use_container_width=True)
 
-    # ----- CSV download --------------------------------------------
+    # ----- CSV & Excel / PNG downloads ------------------------------
     with download_container:
         summary_df = pd.DataFrame(
             [
@@ -535,10 +536,11 @@ if "edited_df" in st.session_state:          # guard for first page load
             ]
         )
 
+        # CSV (unchanged, no images possible in CSV)
         buf = io.StringIO()
         summary_df.to_csv(buf, index=False)
         buf.write("\n")
-        df_final.to_csv(buf, index=False)  # includes target_buck column
+        df_final.to_csv(buf, index=False)
         csv_bytes = buf.getvalue().encode("utf-8")
 
         st.download_button(
@@ -546,4 +548,63 @@ if "edited_df" in st.session_state:          # guard for first page load
             csv_bytes,
             "deerlens_results.csv",
             "text/csv",
+        )
+
+        # Try to render the heatmap figure to PNG bytes (requires kaleido)
+        fig = st.session_state.get("fig_hm")
+        png_bytes = None
+        png_err = None
+        if fig is not None:
+            try:
+                # scale>1 for sharper image in Excel
+                png_bytes = fig.to_image(format="png", scale=2)  # needs 'kaleido'
+            except Exception as e:
+                png_err = str(e)
+
+        # Excel workbook: Summary, Data, Heatmap (with embedded PNG if available)
+        from io import BytesIO
+        xlsx_buf = BytesIO()
+        with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
+            # Sheets: Summary & Data
+            summary_df.to_excel(writer, index=False, sheet_name="Summary")
+            df_final.to_excel(writer, index=False, sheet_name="Data")
+
+            if png_bytes is not None:
+                # Create Heatmap sheet and insert the image
+                ws = writer.book.add_worksheet("Heatmap")
+                writer.sheets["Heatmap"] = ws
+                ws.set_column("A:A", 2)  # small left margin
+                ws.insert_image(
+                    "B2",
+                    "heatmap.png",
+                    {"image_data": BytesIO(png_bytes), "x_scale": 1.0, "y_scale": 1.0},
+                )
+            else:
+                # Either no figure (no dates) or kaleido missing—leave a note
+                ws = writer.book.add_worksheet("Heatmap")
+                writer.sheets["Heatmap"] = ws
+                msg = (
+                    "Heatmap image not available. "
+                    "If this is a kaleido issue, run: pip install -U kaleido"
+                )
+                if png_err:
+                    msg += f" | Error: {png_err}"
+                ws.write("A1", msg)
+
+        xlsx_data = xlsx_buf.getvalue()
+        st.download_button(
+            "Download Excel (data + Heatmap image)",
+            xlsx_data,
+            "deerlens_results.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        # Optional: direct PNG download of the heatmap
+        st.download_button(
+            "Download Heatmap PNG",
+            data=png_bytes if png_bytes is not None else b"",
+            file_name="deerlens_heatmap.png",
+            mime="image/png",
+            disabled=(png_bytes is None),
+            help="Disabled until a heatmap is generated (or install 'kaleido').",
         )
