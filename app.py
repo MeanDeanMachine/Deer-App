@@ -473,6 +473,16 @@ if "edited_df" in st.session_state:          # guard for first page load
 
             buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
             dates   = sorted(agg["date"].unique())
+                   
+            # Show time ranges beside each bucket label (keep in sync with bucket_time())
+            bucket_labels = {
+               "Dawn":      "Dawn (6:00–8:00 am)",
+               "Morning":   "Morning (8:01–11:00 am)",
+               "Midday":    "Midday (11:01 am–4:00 pm)",
+               "Afternoon": "Afternoon (4:01–6:30 pm)",
+               "Evening":   "Evening (6:31–8:59 pm)",
+               "Night":     "Night (9:00 pm–5:59 am)",
+            }
 
             # matrix for total activity heat layer
             z = [[int(agg.query("bucket==@b and date==@d")["activity"].sum())
@@ -523,7 +533,17 @@ if "edited_df" in st.session_state:          # guard for first page load
             )
 
             fig_hm = go.Figure([heat, dots_green, dots_red])
+
+            # Keep your current top↔bottom arrangement
             fig_hm.update_yaxes(autorange="reversed")
+
+            # Apply custom labels with time ranges
+            fig_hm.update_yaxes(
+                tickmode="array",
+                tickvals=buckets,
+                ticktext=[bucket_labels[b] for b in buckets],
+            )
+
             fig_hm.update_layout(
                 title=("Heat-map of Total Activity<br>"
                        "<span style='font-size:0.8em'>"
@@ -533,6 +553,7 @@ if "edited_df" in st.session_state:          # guard for first page load
                 yaxis_title="Time of Day", xaxis_title="Date",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
+
             st.session_state["fig_hm"] = fig_hm  # store for export
             st.plotly_chart(fig_hm, use_container_width=True)
 
@@ -604,7 +625,17 @@ if "edited_df" in st.session_state:          # guard for first page load
 
             buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
             dates   = sorted([d for d in agg["date"].unique() if pd.notna(d)])
-
+            
+            # Show time ranges beside each bucket label (keep in sync with bucket_time())
+            bucket_labels = {
+               "Dawn":      "Dawn (6:00–8:00 am)",
+               "Morning":   "Morning (8:01–11:00 am)",
+               "Midday":    "Midday (11:01 am–4:00 pm)",
+               "Afternoon": "Afternoon (4:01–6:30 pm)",
+               "Evening":   "Evening (6:31–8:59 pm)",
+               "Night":     "Night (9:00 pm–5:59 am)",
+            }
+                   
             # Heat matrix
             z = np.array(
                 [
@@ -651,7 +682,7 @@ if "edited_df" in st.session_state:          # guard for first page load
             ax.set_xticks(range(len(dates)))
             ax.set_xticklabels([str(d) for d in dates], rotation=45, ha="right")
             ax.set_yticks(range(len(buckets)))
-            ax.set_yticklabels(buckets)
+            ax.set_yticklabels([bucket_labels[b] for b in buckets])
             ax.set_xlabel("Date")
             ax.set_ylabel("Time of Day")
             ax.set_title("Heat-map of Total Activity (green=buck count, red=# target-buck sightings)")
