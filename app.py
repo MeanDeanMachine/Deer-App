@@ -272,11 +272,22 @@ if "edited_df" in st.session_state:
     if "open_cat" not in st.session_state:
         st.session_state.open_cat = None
 
+# Guard: only proceed if results exist
+if "image_results" not in st.session_state or "edited_df" not in st.session_state:
+    st.info("Upload images and click **Process Images** to see results.")
+    st.stop()
+
 # gallery -------------------------------------------------------------
 st.header("Annotated Images")
 
 THUMB_W = 800
 cats = categorise(results, st.session_state.edited_df)
+
+def _sort_key_datetime(value):
+    dt = pd.to_datetime(value, errors="coerce")
+    # sort NaT / missing dates LAST
+    return (pd.isna(dt), dt if pd.notna(dt) else pd.Timestamp.max)
+
 
 # ▒▒▒ bulk-edit form ▒▒▒
 with st.form("bulk_overrides", clear_on_submit=False):
@@ -287,7 +298,7 @@ with st.form("bulk_overrides", clear_on_submit=False):
         # sort by date_time (earliest first)
         imgs = sorted(
             imgs,
-            key=lambda r: pd.to_datetime(r.date_time, errors="coerce")
+            key=lambda r: _sort_key_datetime(r.date_time)
         )
 
         # remember if this pane should be open on rerun
@@ -525,7 +536,7 @@ if "edited_df" in st.session_state:          # guard for first page load
             st.session_state["fig_hm"] = fig_hm  # store for export
             st.plotly_chart(fig_hm, use_container_width=True)
 
-    # ----- CSV & Excel / PNG downloads ------------------------------
+    # ----- CSV & Excel / PNG downloads (fast Matplotlib fallback) ---
     with download_container:
         summary_df = pd.DataFrame(
             [
@@ -550,145 +561,120 @@ if "edited_df" in st.session_state:          # guard for first page load
             "text/csv",
         )
 
-        # Try to render the Plotly heatmap to PNG bytes
-        fig = st.session_state.get("fig_hm")
-        png_bytes = None
-        png_err = None
-
-        def _plotly_png_try(fig_obj):
-            try:
-                return fig_obj.to_image(format="png", scale=2), None
-            except Exception as e:
-                return None, str(e)
-
-        if fig is not None:
-            png_bytes, png_err = _plotly_png_try(fig)
-            # If Chrome is missing, auto-download it and retry once
-            if png_bytes is None and png_err and "requires Google Chrome" in png_err:
-                try:
-                    import subprocess
-                    # Runs the console script installed by plotly>=5.24
-                    subprocess.run(["plotly_get_chrome"], check=True)
-                    png_bytes, png_err = _plotly_png_try(fig)
-                except Exception as e2:
-                    png_err = f"{png_err} | Retry failed: {e2}"
-
-        # If Plotly export still failed, build a Matplotlib fallback PNG
-        if png_bytes is None:
-            try:
-                import matplotlib
-                matplotlib.use("Agg")
-                import matplotlib.pyplot as plt
-                import numpy as np
-
-                # Recompute the same aggregates used for the heatmap
-                ts = pd.to_datetime(df_final["date_time"], errors="coerce")
-                heat_df = df_final.copy()
-                heat_df["date"]   = ts.dt.date
-                heat_df["bucket"] = ts.apply(bucket_time)
-                if "target_buck" not in heat_df.columns:
-                    heat_df["target_buck"] = False
-                heat_df["target_buck"] = heat_df["target_buck"].fillna(False).astype(bool)
-                heat_df["tb_sightings"] = heat_df["target_buck"].astype(int)
-
-                agg = (
-                    heat_df.groupby(["bucket", "date"], as_index=False)
-                    .agg(
-                        buck=("buck_count", "sum"),
-                        deer=("deer_count", "sum"),
-                        doe=("doe_count", "sum"),
-                        tb_sightings=("tb_sightings", "sum"),
-                    )
-                )
-                agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
-
-                buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
-                dates   = sorted(agg["date"].dropna().unique().tolist())
-
-                # Heat matrix
-                z = np.array(
-                    [
-                        [int(agg.query("bucket==@b and date==@d")["activity"].sum())
-                         for d in dates]
-                        for b in buckets
-                    ],
-                    dtype=float,
-                )
-
-                # Green (buck count) bubbles
-                gx, gy, gs = [], [], []
-                for bi, b in enumerate(buckets):
-                    for di, d in enumerate(dates):
-                        bk = int(agg.query("bucket==@b and date==@d")["buck"].sum())
-                        if bk:
-                            gx.append(di); gy.append(bi); gs.append(bk * 10 + 8)
-
-                # Red (target-buck sightings) bubbles
-                rx, ry, rs = [], [], []
-                for bi, b in enumerate(buckets):
-                    for di, d in enumerate(dates):
-                        tb = int(agg.query("bucket==@b and date==@d")["tb_sightings"].sum())
-                        if tb:
-                            rx.append(di); ry.append(bi); rs.append(tb * 8 + 6)
-
-                # Draw with Matplotlib
-                fig_mpl, ax = plt.subplots(figsize=(12, 6), dpi=150)
-                im = ax.imshow(z, aspect="auto", cmap="Blues", origin="upper")
-
-                # Buck bubbles (green)
-                ax.scatter(gx, gy, s=gs, marker="o",
-                           facecolors="#228B22", edgecolors="white", linewidths=1, alpha=0.85)
-                # Target-buck sightings (red)
-                ax.scatter(rx, ry, s=rs, marker="o",
-                           facecolors="#C62828", edgecolors="white", linewidths=1, alpha=0.9)
-
-                # Axes / labels
-                ax.set_xticks(range(len(dates)))
-                ax.set_xticklabels([str(d) for d in dates], rotation=45, ha="right")
-                ax.set_yticks(range(len(buckets)))
-                ax.set_yticklabels(buckets)
-                ax.set_xlabel("Date")
-                ax.set_ylabel("Time of Day")
-                ax.set_title("Heat-map of Total Activity (green=buck count, red=# target-buck sightings)")
-                cbar = plt.colorbar(im, ax=ax)
-                cbar.set_label("Total Activity")
-
-                plt.tight_layout()
-                from io import BytesIO
-                _buf = BytesIO()
-                fig_mpl.savefig(_buf, format="png", bbox_inches="tight")
-                plt.close(fig_mpl)
-                png_bytes = _buf.getvalue()
-                png_err = None
-            except Exception as e3:
-                png_err = f"Matplotlib fallback failed: {e3}"
-
-        # Choose Excel writer engine dynamically
+        # Build a PNG of the heatmap using Matplotlib (no Chrome/Kaleido required)
         from io import BytesIO
+        png_bytes = None
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            # Recompute aggregates (same as your Plotly heatmap)
+            ts = pd.to_datetime(df_final["date_time"], errors="coerce")
+            heat_df = df_final.copy()
+            heat_df["date"]   = ts.dt.date
+            heat_df["bucket"] = ts.apply(bucket_time)
+
+            if "target_buck" not in heat_df.columns:
+                heat_df["target_buck"] = False
+            heat_df["target_buck"]  = heat_df["target_buck"].fillna(False).astype(bool)
+            heat_df["tb_sightings"] = heat_df["target_buck"].astype(int)
+
+            agg = (
+                heat_df.groupby(["bucket", "date"], as_index=False)
+                .agg(
+                    buck=("buck_count", "sum"),
+                    deer=("deer_count", "sum"),
+                    doe=("doe_count", "sum"),
+                    tb_sightings=("tb_sightings", "sum"),
+                )
+            )
+            agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
+
+            buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
+            dates   = sorted([d for d in agg["date"].unique() if pd.notna(d)])
+
+            # Heat matrix
+            z = np.array(
+                [
+                    [int(agg.query("bucket==@b and date==@d")["activity"].sum() or 0)
+                     for d in dates]
+                    for b in buckets
+                ],
+                dtype=float,
+            )
+
+            # Green (buck count) bubbles
+            gx, gy, gs = [], [], []
+            for bi, b in enumerate(buckets):
+                for di, d in enumerate(dates):
+                    bk = int(agg.query("bucket==@b and date==@d")["buck"].sum() or 0)
+                    if bk:
+                        gx.append(di); gy.append(bi); gs.append(bk * 10 + 8)
+
+            # Red (target-buck sightings) bubbles
+            rx, ry, rs = [], [], []
+            for bi, b in enumerate(buckets):
+                for di, d in enumerate(dates):
+                    tb = int(agg.query("bucket==@b and date==@d")["tb_sightings"].sum() or 0)
+                    if tb:
+                        rx.append(di); ry.append(bi); rs.append(tb * 8 + 6)
+
+            # Draw with Matplotlib
+            fig_mpl, ax = plt.subplots(figsize=(12, 6), dpi=150)
+            im = ax.imshow(z, aspect="auto", cmap="Blues", origin="upper")
+
+            # Buck bubbles (green)
+            ax.scatter(gx, gy, s=gs, marker="o",
+                       facecolors="#228B22", edgecolors="white", linewidths=1, alpha=0.85)
+            # Target-buck sightings (red)
+            ax.scatter(rx, ry, s=rs, marker="o",
+                       facecolors="#C62828", edgecolors="white", linewidths=1, alpha=0.9)
+
+            # Axes / labels
+            ax.set_xticks(range(len(dates)))
+            ax.set_xticklabels([str(d) for d in dates], rotation=45, ha="right")
+            ax.set_yticks(range(len(buckets)))
+            ax.set_yticklabels(buckets)
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Time of Day")
+            ax.set_title("Heat-map of Total Activity (green=buck count, red=# target-buck sightings)")
+            cbar = plt.colorbar(im, ax=ax)
+            cbar.set_label("Total Activity")
+
+            plt.tight_layout()
+            _buf = BytesIO()
+            fig_mpl.savefig(_buf, format="png", bbox_inches="tight")
+            plt.close(fig_mpl)
+            png_bytes = _buf.getvalue()
+        except Exception as e:
+            png_bytes = None
+            st.warning(f"Could not render heatmap PNG fallback: {e}")
+
+        # Write Excel with Heatmap sheet (insert PNG if available)
         xlsx_buf = BytesIO()
         try:
-            import xlsxwriter  # noqa: F401
+            import xlsxwriter  # if present, prefer it
             excel_engine = "xlsxwriter"
         except Exception:
             excel_engine = "openpyxl"
 
         with pd.ExcelWriter(xlsx_buf, engine=excel_engine) as writer:
-            # Sheets: Summary & Data
             summary_df.to_excel(writer, index=False, sheet_name="Summary")
             df_final.to_excel(writer, index=False, sheet_name="Data")
 
-            # Heatmap sheet: insert PNG if available, else message
-            if png_bytes is not None:
+            if png_bytes:
                 if excel_engine == "xlsxwriter":
                     ws = writer.book.add_worksheet("Heatmap")
                     writer.sheets["Heatmap"] = ws
-                    ws.set_column("A:A", 2)  # small left margin
+                    ws.set_column("A:A", 2)
                     ws.insert_image(
                         "B2",
                         "heatmap.png",
                         {"image_data": BytesIO(png_bytes), "x_scale": 1.0, "y_scale": 1.0},
                     )
-                else:  # openpyxl path
+                else:
                     from openpyxl.drawing.image import Image as XLImage
                     from PIL import Image as PILImage
                     ws = writer.book.create_sheet("Heatmap")
@@ -700,23 +686,11 @@ if "edited_df" in st.session_state:          # guard for first page load
                 if excel_engine == "xlsxwriter":
                     ws = writer.book.add_worksheet("Heatmap")
                     writer.sheets["Heatmap"] = ws
-                    msg = (
-                        "Heatmap image not available."
-                        " If this is a kaleido/Chrome issue, we'll try auto-install with plotly_get_chrome next run."
-                    )
-                    if png_err:
-                        msg += f" | Error: {png_err}"
-                    ws.write("A1", msg)
+                    ws.write("A1", "Heatmap image not available.")
                 else:
                     ws = writer.book.create_sheet("Heatmap")
                     writer.sheets["Heatmap"] = ws
-                    msg = (
-                        "Heatmap image not available."
-                        " If this is a kaleido/Chrome issue, we'll try auto-install with plotly_get_chrome next run."
-                    )
-                    if png_err:
-                        msg += f" | Error: {png_err}"
-                    ws["A1"] = msg
+                    ws["A1"] = "Heatmap image not available."
 
         xlsx_data = xlsx_buf.getvalue()
         st.download_button(
@@ -724,14 +698,4 @@ if "edited_df" in st.session_state:          # guard for first page load
             xlsx_data,
             "deerlens_results.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-        # Optional: direct PNG download of the heatmap
-        st.download_button(
-            "Download Heatmap PNG",
-            data=png_bytes if png_bytes is not None else b"",
-            file_name="deerlens_heatmap.png",
-            mime="image/png",
-            disabled=(png_bytes is None),
-            help="Disabled until a heatmap is generated or a fallback succeeds.",
         )
