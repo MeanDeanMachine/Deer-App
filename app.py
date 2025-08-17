@@ -434,27 +434,40 @@ if "edited_df" in st.session_state:          # guard for first page load
             fig_bar.update_layout(barmode="stack", xaxis_tickangle=-45)
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # heat-map
+        # heat-map + overlays (green = bucks, red = target-buck sightings)
         if df_final["date_time"].notna().any():
             ts = pd.to_datetime(df_final["date_time"], errors="coerce")
             heat_df = df_final.copy()
             heat_df["date"]   = ts.dt.date
             heat_df["bucket"] = ts.apply(bucket_time)
 
+            # ensure target_buck column exists and is boolean
+            if "target_buck" not in heat_df.columns:
+                heat_df["target_buck"] = False
+            heat_df["target_buck"] = heat_df["target_buck"].fillna(False).astype(bool)
+
+            # derive target-buck sightings (count of images flagged as target buck)
+            heat_df["tb_sightings"] = heat_df["target_buck"].astype(int)
+
             agg = (
                 heat_df.groupby(["bucket", "date"], as_index=False)
-                .agg(buck=("buck_count", "sum"),
-                     deer=("deer_count", "sum"),
-                     doe=("doe_count", "sum"))
+                .agg(
+                    buck=("buck_count", "sum"),
+                    deer=("deer_count", "sum"),
+                    doe=("doe_count", "sum"),
+                    tb_sightings=("tb_sightings", "sum"),
+                )
             )
             agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
 
             buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
             dates   = sorted(agg["date"].unique())
 
+            # matrix for total activity heat layer
             z = [[int(agg.query("bucket==@b and date==@d")["activity"].sum())
                   for d in dates] for b in buckets]
 
+            # GREEN bubbles = total buck count
             sx, sy, ss, sc = [], [], [], []
             for b in buckets:
                 for d in dates:
@@ -462,27 +475,52 @@ if "edited_df" in st.session_state:          # guard for first page load
                     if bk:
                         sx.append(d); sy.append(b); ss.append(bk * 10 + 8); sc.append(bk)
 
+            # RED bubbles = number of target-buck sightings
+            rsx, rsy, rss, rsc = [], [], [], []
+            for b in buckets:
+                for d in dates:
+                    tb = int(agg.query("bucket==@b and date==@d")["tb_sightings"].sum())
+                    if tb:
+                        rsx.append(d); rsy.append(b)
+                        # slightly smaller than green so both remain visible
+                        rss.append(tb * 8 + 6)
+                        rsc.append(tb)
+
             heat = go.Heatmap(
                 z=z, x=dates, y=buckets,
                 colorscale=sequential.Blues,
                 colorbar=dict(title="Total Activity"),
                 hovertemplate="Date %{x}<br>%{y}<br>Activity %{z}<extra></extra>",
             )
-            dots = go.Scatter(
+            dots_green = go.Scatter(
+                name="Buck (count)",
                 x=sx, y=sy, mode="markers",
                 marker=dict(size=ss, color="#228B22", opacity=.85,
                             line=dict(width=1, color="white")),
                 customdata=sc,
                 hovertemplate="Date %{x}<br>%{y}<br>Bucks %{customdata}<extra></extra>",
-                showlegend=False,
+                showlegend=True,
             )
-            fig_hm = go.Figure([heat, dots])
+            dots_red = go.Scatter(
+                name="Target Buck (sightings)",
+                x=rsx, y=rsy, mode="markers",
+                marker=dict(size=rss, color="#C62828", opacity=.9,
+                            line=dict(width=1, color="white")),
+                customdata=rsc,
+                hovertemplate="Date %{x}<br>%{y}<br>Target-Buck Sightings %{customdata}<extra></extra>",
+                showlegend=True,
+            )
+
+            fig_hm = go.Figure([heat, dots_green, dots_red])
             fig_hm.update_yaxes(autorange="reversed")
             fig_hm.update_layout(
                 title=("Heat-map of Total Activity<br>"
-                       "<span style='font-size:0.8em'>(bubble size = buck count)</span>"),
+                       "<span style='font-size:0.8em'>"
+                       "green bubble = buck count; red bubble = # target-buck sightings"
+                       "</span>"),
                 xaxis_tickangle=-45, xaxis_type="category",
                 yaxis_title="Time of Day", xaxis_title="Date",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
             st.plotly_chart(fig_hm, use_container_width=True)
 
