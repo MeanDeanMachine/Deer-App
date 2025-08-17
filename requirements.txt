@@ -4,3 +4,4 @@ aiohttp
 plotly
 exifread
 python-dotenv
+kaleido
