@@ -5,3 +5,4 @@ plotly
 exifread
 python-dotenv
 kaleido
+xlsxwriter
