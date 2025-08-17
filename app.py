@@ -7,6 +7,7 @@ DeerLens – Streamlit front-end
 * Clickable 800-px thumbnails
 * **NEW:** Inline editor lets you adjust mis-classified counts, instantly
            refreshing all visuals and the downloadable CSV.
+* **NEW:** 'Target Buck (optional)' manual flag mirrored after Direction
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ class ImageResult:
     doe_count: int
     annotated_image: bytes
     direction: Optional[str] = None
+    target_buck: bool = False
     error: Optional[str] = None
 
 
@@ -69,7 +71,7 @@ async def _process_single(
         annotated, counts = await rf_client.process_image(
             session, image_bytes, file_name
         )
-           # ── NEW: shrink annotated JPEG to ≤600 px width to save RAM ──
+        # ── NEW: shrink annotated JPEG to ≤600 px width to save RAM ──
         try:
             img = Image.open(BytesIO(annotated))
             img.thumbnail((600, 600), Image.LANCZOS)      # long edge ≤600
@@ -87,6 +89,7 @@ async def _process_single(
             deer_count=counts.get("deer", 0),
             doe_count=counts.get("doe", 0),
             annotated_image=annotated,
+            target_buck=False,
         )
     except Exception as exc:
         return ImageResult(
@@ -96,6 +99,7 @@ async def _process_single(
             deer_count=0,
             doe_count=0,
             annotated_image=b"",
+            target_buck=False,
             error=str(exc),
         )
 
@@ -112,10 +116,10 @@ async def process_images_async(
 
         async def task(name: str, data: bytes) -> ImageResult:
             async with sem:
-                try:       
+                try:
                     return await _process_single(session, rf_client, name, data)
                 finally:
-                   # free the raw upload immediately
+                    # free the raw upload immediately
                     del data
 
         tasks = [task(n, b) for n, b in files]
@@ -141,7 +145,8 @@ def to_dataframe(results: List[ImageResult]) -> pd.DataFrame:
                 buck_count=r.buck_count,
                 deer_count=r.deer_count,
                 doe_count=r.doe_count,
-                direction=r.direction
+                direction=r.direction,
+                target_buck=bool(r.target_buck),
             )
             for r in results
         ]
@@ -266,6 +271,7 @@ if "edited_df" in st.session_state:
     # remember the last category pane the user opened
     if "open_cat" not in st.session_state:
         st.session_state.open_cat = None
+
 # gallery -------------------------------------------------------------
 st.header("Annotated Images")
 
@@ -352,6 +358,11 @@ with st.form("bulk_overrides", clear_on_submit=False):
                         index=(dir_opts.index(current_dir) + 1) if current_dir else 0,
                         key=f"dir_{res.file_name}",
                     )
+                    st.checkbox(
+                        "Target Buck (optional)",
+                        value=bool(row.target_buck) if pd.notna(row.target_buck) else False,
+                        key=f"tb_{res.file_name}",
+                    )
 
     # ♦♦ single button – submits all edits ♦♦
     save_all = st.form_submit_button("Apply ALL overrides", type="primary")
@@ -365,12 +376,14 @@ if save_all:
         d  = st.session_state.get(f"deer_{fname}", 0)
         do = st.session_state.get(f"doe_{fname}", 0)
         dr = st.session_state.get(f"dir_{fname}", "—")
+        tb = st.session_state.get(f"tb_{fname}", False)
         dr_clean = None if dr == "—" else dr
 
-        st.session_state.edited_df.loc[
-            st.session_state.edited_df["file_name"] == fname,
-            ["buck_count", "deer_count", "doe_count", "direction"],
-        ] = [b, d, do, dr_clean]
+        st.session_state.ed_df = st.session_state["edited_df"]  # alias for brevity
+        st.session_state.ed_df.loc[
+            st.session_state.ed_df["file_name"] == fname,
+            ["buck_count", "deer_count", "doe_count", "direction", "target_buck"],
+        ] = [b, d, do, dr_clean, bool(tb)]
 
     st.rerun()   # refresh metrics, charts, CSV
 
@@ -487,7 +500,7 @@ if "edited_df" in st.session_state:          # guard for first page load
         buf = io.StringIO()
         summary_df.to_csv(buf, index=False)
         buf.write("\n")
-        df_final.to_csv(buf, index=False)
+        df_final.to_csv(buf, index=False)  # includes target_buck column
         csv_bytes = buf.getvalue().encode("utf-8")
 
         st.download_button(
