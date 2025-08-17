@@ -570,6 +570,16 @@ if "edited_df" in st.session_state:          # guard for first page load
             import matplotlib.pyplot as plt
             import numpy as np
 
+            # ── Size mapping: Plotly px → Matplotlib points² ─────────────
+            # Plotly marker.size ≈ pixel DIAMETER.
+            # Matplotlib scatter 's' = area in points². points = px * (72 / dpi).
+            DPI = 150  # must match fig dpi below
+            GREEN_K, GREEN_B = 10.0, 8.0  # buck bubble: px = K * buck + B
+            RED_K,   RED_B   =  8.0, 6.0  # target-buck bubble slightly smaller
+            def px_to_mpl_area(px: float, dpi: float = DPI) -> float:
+                pts = px * (72.0 / dpi)
+                return pts * pts
+
             # Recompute aggregates (same as your Plotly heatmap)
             ts = pd.to_datetime(df_final["date_time"], errors="coerce")
             heat_df = df_final.copy()
@@ -605,32 +615,37 @@ if "edited_df" in st.session_state:          # guard for first page load
                 dtype=float,
             )
 
-            # Green (buck count) bubbles
+            # Bubble coordinates + SCALED sizes
             gx, gy, gs = [], [], []
-            for bi, b in enumerate(buckets):
-                for di, d in enumerate(dates):
-                    bk = int(agg.query("bucket==@b and date==@d")["buck"].sum() or 0)
-                    if bk:
-                        gx.append(di); gy.append(bi); gs.append(bk * 10 + 8)
-
-            # Red (target-buck sightings) bubbles
             rx, ry, rs = [], [], []
             for bi, b in enumerate(buckets):
                 for di, d in enumerate(dates):
+                    bk = int(agg.query("bucket==@b and date==@d")["buck"].sum() or 0)
                     tb = int(agg.query("bucket==@b and date==@d")["tb_sightings"].sum() or 0)
+                    if bk:
+                        size_px = GREEN_K * bk + GREEN_B         # pixel diameter like Plotly
+                        gx.append(di); gy.append(bi); gs.append(px_to_mpl_area(size_px, DPI))
                     if tb:
-                        rx.append(di); ry.append(bi); rs.append(tb * 8 + 6)
+                        size_px_r = RED_K * tb + RED_B            # smaller red
+                        rx.append(di); ry.append(bi); rs.append(px_to_mpl_area(size_px_r, DPI))
 
             # Draw with Matplotlib
-            fig_mpl, ax = plt.subplots(figsize=(12, 6), dpi=150)
+            fig_mpl, ax = plt.subplots(figsize=(12, 6), dpi=DPI)
             im = ax.imshow(z, aspect="auto", cmap="Blues", origin="upper")
 
-            # Buck bubbles (green)
-            ax.scatter(gx, gy, s=gs, marker="o",
-                       facecolors="#228B22", edgecolors="white", linewidths=1, alpha=0.85)
-            # Target-buck sightings (red)
-            ax.scatter(rx, ry, s=rs, marker="o",
-                       facecolors="#C62828", edgecolors="white", linewidths=1, alpha=0.9)
+            # Buck bubbles (green) below, Target-buck (red) above
+            if gx:
+                ax.scatter(
+                    gx, gy, s=gs, marker="o", zorder=2,
+                    facecolors="#228B22", edgecolors="white",
+                    linewidths=1, alpha=0.85
+                )
+            if rx:
+                ax.scatter(
+                    rx, ry, s=rs, marker="o", zorder=3,
+                    facecolors="#C62828", edgecolors="white",
+                    linewidths=1, alpha=0.9
+                )
 
             # Axes / labels
             ax.set_xticks(range(len(dates)))
@@ -642,6 +657,8 @@ if "edited_df" in st.session_state:          # guard for first page load
             ax.set_title("Heat-map of Total Activity (green=buck count, red=# target-buck sightings)")
             cbar = plt.colorbar(im, ax=ax)
             cbar.set_label("Total Activity")
+            ax.set_xlim(-0.5, max(len(dates) - 0.5, 0.5))
+            ax.set_ylim(-0.5, len(buckets) - 0.5)
 
             plt.tight_layout()
             _buf = BytesIO()
