@@ -1,17 +1,16 @@
 """
-DeerLens – Streamlit front-end (disk-backed thumbnails + batching + pagination)
+DeerLens – Streamlit front-end (STREAMING + disk-backed thumbnails)
 - Upload up to 900 JPEGs
-- Runs Roboflow workflow asynchronously
-- Shows KPI cards, stacked bar, time-of-day heat-map
+- Roboflow workflow (async I/O, but strictly one-at-a-time to control RAM)
+- KPI cards, stacked bar, time-of-day heat-map
 - Clickable thumbnails with full-size viewer (modal if available)
-- Inline editor (optional toggle) + Data Editor table (primary)
+- Data Editor table (primary) + optional per-image inline overrides
 - Thumbnails stored on disk (temp dir) to keep RAM stable on Streamlit Cloud
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64  # still used for CSV building, not for images
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -21,6 +20,7 @@ import gc
 import uuid
 import shutil
 import tempfile
+
 import aiohttp
 import pandas as pd
 import plotly.express as px
@@ -39,8 +39,6 @@ from roboflow_client import RoboflowClient
 DIRECTIONS = ["", "N", "NE", "E", "SE", "S", "SW", "W", "NW"]  # "" = no entry
 THUMB_MAX = (512, 512)  # hard cap to keep memory down
 THUMB_QUAL = 75         # JPEG quality
-DEFAULT_BATCH = 25      # process 20–50 at a time
-DEFAULT_CONCURRENCY = 3 # aiohttp concurrency
 THUMB_DISPLAY_W = 800   # UI width; actual file is ≤512px so browser scales up
 
 # ──────────────────────────────────────────────────────────────────────
@@ -60,7 +58,7 @@ class ImageResult:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Async inference helpers
+# Async inference helpers (strictly one-at-a-time for stability)
 # ──────────────────────────────────────────────────────────────────────
 async def _process_single(
     session: aiohttp.ClientSession,
@@ -78,7 +76,7 @@ async def _process_single(
     try:
         annotated, counts = await rf_client.process_image(session, image_bytes, file_name)
 
-        # shrink annotated JPEG aggressively to save RAM/IO
+        # shrink annotated JPEG to save RAM/IO
         try:
             img = Image.open(BytesIO(annotated))
             img.thumbnail(THUMB_MAX, Image.LANCZOS)
@@ -90,8 +88,7 @@ async def _process_single(
             except Exception:
                 pass
         except Exception:
-            # Fall back to original returned bytes
-            pass
+            pass  # fall back to original returned bytes if Pillow fails
 
         # write to disk; keep only path in memory
         safe_name = f"{uuid.uuid4().hex}_{os.path.basename(file_name)}".replace(" ", "_")
@@ -121,31 +118,49 @@ async def _process_single(
         )
 
 
-async def process_images_async(
-    files: List[Tuple[str, bytes]], rf_client: RoboflowClient, temp_dir: str
+async def process_images_streaming_async(
+    uploaded_files, rf_client: RoboflowClient, temp_dir: str
 ) -> List[ImageResult]:
-    """Concurrently process many images (but only those provided in this batch)."""
-    results, processed, total = [], 0, len(files)
-    bar = st.progress(0)
-    sem = asyncio.Semaphore(DEFAULT_CONCURRENCY)
+    """
+    Ultra-safe memory path: process files strictly one-by-one.
+    - no preloading a list of bytes
+    - no task list
+    - no concurrency
+    """
+    results: List[ImageResult] = []
+    total = len(uploaded_files)
+    bar = st.progress(0.0, text="Processing images…")
 
-    connector = aiohttp.TCPConnector(limit=DEFAULT_CONCURRENCY)
+    connector = aiohttp.TCPConnector(limit=1)  # enforce one socket at a time
     async with aiohttp.ClientSession(connector=connector) as session:
-
-        async def task(name: str, data: bytes) -> ImageResult:
-            async with sem:
-                try:
-                    return await _process_single(session, rf_client, name, data, temp_dir)
-                finally:
-                    # free raw upload bytes ASAP
+        for i, f in enumerate(uploaded_files, 1):
+            data = None
+            try:
+                data = f.read()  # read only this file into memory
+                res = await _process_single(session, rf_client, f.name, data, temp_dir)
+                results.append(res)
+            except MemoryError:
+                st.error(
+                    f"Out of memory while processing {f.name}. "
+                    "Try fewer images in one run."
+                )
+                raise
+            except Exception as e:
+                # Record a per-image error but keep going
+                results.append(
+                    ImageResult(
+                        file_name=f.name, date_time=None,
+                        buck_count=0, deer_count=0, doe_count=0,
+                        annotated_path="", target_buck=False, error=str(e)
+                    )
+                )
+            finally:
+                if data is not None:
                     del data
+                if i % 5 == 0:
+                    gc.collect()
+                bar.progress(i / total, text=f"{i}/{total} processed")
 
-        tasks = [task(n, b) for n, b in files]
-        for fut in asyncio.as_completed(tasks):
-            res = await fut
-            results.append(res)
-            processed += 1
-            bar.progress(processed / max(total, 1))
     bar.empty()
     gc.collect()
     return results
@@ -277,23 +292,12 @@ if uploader:
             st.error(str(e))
             st.stop()
 
-        total = len(uploader)
-        BATCH = DEFAULT_BATCH
-        bar = st.progress(0.0, text="Processing images…")
-        all_results: List[ImageResult] = []
-
         try:
-            for i in range(0, total, BATCH):
-                batch = uploader[i:i + BATCH]
-                files_data = [(f.name, f.read()) for f in batch]
-                batch_results = asyncio.run(process_images_async(files_data, client, st.session_state["temp_dir"]))
-                all_results.extend(batch_results)
-                files_data.clear()
-                gc.collect()
-                bar.progress((i + len(batch)) / total, text=f"{i + len(batch)}/{total} processed")
-            bar.empty()
+            # 🚰 Stream the whole set strictly one-by-one
+            all_results = asyncio.run(
+                process_images_streaming_async(uploader, client, st.session_state["temp_dir"])
+            )
         except MemoryError:
-            st.error("Ran out of memory while processing. Try a smaller batch size (e.g., 20).")
             st.stop()
         except Exception as e:
             st.exception(e)
@@ -354,12 +358,8 @@ with st.form("bulk_overrides", clear_on_submit=False):
     for cat_name in ["Buck", "Deer", "Doe", "No Tag"]:
         imgs = cats.get(cat_name, [])
 
-        # sort by date_time (earliest first) and paginate per category
-        imgs = sorted(imgs, key=lambda r: _sort_key_datetime(
-            st.session_state["edited_df"].loc[
-                st.session_state["edited_df"]["file_name"] == r.file_name, "date_time"
-            ].iloc[0] if (st.session_state["edited_df"]["file_name"] == r.file_name).any() else None
-        ))
+        # sort by EXIF date_time and paginate per category
+        imgs = sorted(imgs, key=lambda r: _sort_key_datetime(r.date_time))
         start = (page - 1) * PER_CAT
         end = start + PER_CAT
         total_in_cat = len(imgs)
@@ -430,7 +430,6 @@ if save_all and show_inline:
     ed_df = st.session_state["edited_df"]
     # Only update rows that had widgets on this page (keys present)
     for fname in ed_df["file_name"]:
-        # For each field, only commit if the widget key exists to avoid zeroing others
         k_b, k_d, k_do, k_dir, k_tb = (f"buck_{fname}", f"deer_{fname}", f"doe_{fname}", f"dir_{fname}", f"tb_{fname}")
         updates = {}
         if k_b in st.session_state:   updates["buck_count"] = int(st.session_state[k_b])
