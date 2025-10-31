@@ -41,7 +41,7 @@ class RoboflowClient:
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
+        api_key: Optional[str] = "QlPxiNTzU6QV88y7xOj7",
         workflow_url: Optional[str] = None,
         legacy_project_ver: Optional[str] = None,
     ) -> None:
