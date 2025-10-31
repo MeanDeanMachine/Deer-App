@@ -353,6 +353,8 @@ def _sort_key_datetime(value):
     dt = pd.to_datetime(value, errors="coerce")
     return (pd.isna(dt), dt if pd.notna(dt) else pd.Timestamp.max)
 
+images_on_page = []  # Stephen - collect (res, path) tuples for buttons outside form
+
 # ▒▒▒ bulk-edit form ▒▒▒  (only commits inline widgets if enabled)
 with st.form("bulk_overrides", clear_on_submit=False):
     for cat_name in ["Buck", "Deer", "Doe", "No Tag"]:
@@ -387,17 +389,9 @@ with st.form("bulk_overrides", clear_on_submit=False):
                     if not path or not os.path.exists(path):
                         st.write(f"{res.file_name} (no annotated image)")
                     else:
-                        st.image(path, width=THUMB_DISPLAY_W, caption=res.file_name, output_format="JPEG")
-                        if st.button("🔍 Open full size", key=f"open_{res.file_name}"):
-                            st.session_state["viewer_path"] = path
-                            st.session_state["viewer_name"] = res.file_name
-                        # Use modal if available
-                        if hasattr(st, "modal") and st.session_state.get("viewer_path") == path:
-                            with st.modal(res.file_name, key=f"modal_{res.file_name}"):
-                                st.image(path, use_container_width=True)
-                                if st.button("Close", key=f"close_{res.file_name}"):
-                                    st.session_state.pop("viewer_path", None)
-                                    st.session_state.pop("viewer_name", None)
+                        # Stephen - Display image with caption - button will be outside form
+                        st.image(path, width=THUMB_DISPLAY_W, caption=f"{res.file_name} (click button below to view full size)", output_format="JPEG")
+                        images_on_page.append((res, path))
 
                 if show_inline and row is not None:
                     with col_edit:
@@ -424,6 +418,18 @@ with st.form("bulk_overrides", clear_on_submit=False):
         type="primary",
         disabled=not show_inline
     )
+
+# Stephen - View Full Size Moved
+if images_on_page:
+    st.markdown("---")
+    st.subheader("🔍 View Full Size Images")
+    cols = st.columns(min(4, len(images_on_page)))
+    for idx, (res, path) in enumerate(images_on_page):
+        with cols[idx % len(cols)]:
+            if st.button(f"View {res.file_name}", key=f"view_btn_{res.file_name}"):
+                st.session_state["viewer_path"] = path
+                st.session_state["viewer_name"] = res.file_name
+                st.rerun()
 
 # Commit inline overrides (only for keys that exist) -------------------
 if save_all and show_inline:
