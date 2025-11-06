@@ -40,6 +40,7 @@ DIRECTIONS = ["", "N", "NE", "E", "SE", "S", "SW", "W", "NW"]  # "" = no entry
 THUMB_MAX = (512, 512)  # hard cap to keep memory down
 THUMB_QUAL = 75         # JPEG quality
 THUMB_DISPLAY_W = 800   # UI width; actual file is ≤512px so browser scales up
+BATCH_SIZE = 50         # Process files in batches to control memory usage
 
 # ──────────────────────────────────────────────────────────────────────
 # Data structures
@@ -122,10 +123,10 @@ async def process_images_streaming_async(
     uploaded_files, rf_client: RoboflowClient, temp_dir: str
 ) -> List[ImageResult]:
     """
-    Ultra-safe memory path: process files strictly one-by-one.
-    - no preloading a list of bytes
-    - no task list
-    - no concurrency
+    Batch-based memory-safe processing:
+    - Process files in batches of BATCH_SIZE
+    - Clear memory between batches
+    - Strictly one-by-one within each batch
     """
     results: List[ImageResult] = []
     total = len(uploaded_files)
@@ -133,33 +134,44 @@ async def process_images_streaming_async(
 
     connector = aiohttp.TCPConnector(limit=1)  # enforce one socket at a time
     async with aiohttp.ClientSession(connector=connector) as session:
-        for i, f in enumerate(uploaded_files, 1):
-            data = None
-            try:
-                data = f.read()  # read only this file into memory
-                res = await _process_single(session, rf_client, f.name, data, temp_dir)
-                results.append(res)
-            except MemoryError:
-                st.error(
-                    f"Out of memory while processing {f.name}. "
-                    "Try fewer images in one run."
-                )
-                raise
-            except Exception as e:
-                # Record a per-image error but keep going
-                results.append(
-                    ImageResult(
-                        file_name=f.name, date_time=None,
-                        buck_count=0, deer_count=0, doe_count=0,
-                        annotated_path="", target_buck=False, error=str(e)
+        # Process in batches
+        for batch_start in range(0, total, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, total)
+            batch_files = uploaded_files[batch_start:batch_end]
+            
+            st.info(f"Processing batch {batch_start // BATCH_SIZE + 1} of {(total + BATCH_SIZE - 1) // BATCH_SIZE} (files {batch_start + 1}-{batch_end})")
+            
+            for i, f in enumerate(batch_files, batch_start + 1):
+                data = None
+                try:
+                    data = f.read()  # read only this file into memory
+                    res = await _process_single(session, rf_client, f.name, data, temp_dir)
+                    results.append(res)
+                except MemoryError:
+                    st.error(
+                        f"Out of memory while processing {f.name}. "
+                        "Try reducing BATCH_SIZE or processing fewer images."
                     )
-                )
-            finally:
-                if data is not None:
-                    del data
-                if i % 5 == 0:
-                    gc.collect()
-                bar.progress(i / total, text=f"{i}/{total} processed")
+                    raise
+                except Exception as e:
+                    # Record a per-image error but keep going
+                    results.append(
+                        ImageResult(
+                            file_name=f.name, date_time=None,
+                            buck_count=0, deer_count=0, doe_count=0,
+                            annotated_path="", target_buck=False, error=str(e)
+                        )
+                    )
+                finally:
+                    if data is not None:
+                        del data
+                    if i % 5 == 0:
+                        gc.collect()
+                    bar.progress(i / total, text=f"{i}/{total} processed")
+            
+            # Aggressive cleanup after each batch
+            gc.collect()
+            st.success(f"Batch {batch_start // BATCH_SIZE + 1} complete. Cleaned up memory.")
 
     bar.empty()
     gc.collect()
@@ -303,12 +315,16 @@ if uploader:
             st.exception(e)
             st.stop()
 
-        # Cache results for UI / editing
+        # Cache results for UI / editing (optimized for memory)
         st.session_state["image_results"] = all_results
-        st.session_state["orig_df"] = to_dataframe(all_results)
-        st.session_state["edited_df"] = st.session_state["orig_df"].copy()
+        # Remove orig_df - not needed, saves memory
+        st.session_state["edited_df"] = to_dataframe(all_results)
         if "open_cat" not in st.session_state:
             st.session_state.open_cat = None
+        
+        # Force garbage collection after processing
+        gc.collect()
+        st.success(f"✅ Successfully processed {len(all_results)} images in {(len(all_results) + BATCH_SIZE - 1) // BATCH_SIZE} batches")
 
 # Guard: only proceed if results exist
 if "image_results" not in st.session_state or "edited_df" not in st.session_state:
