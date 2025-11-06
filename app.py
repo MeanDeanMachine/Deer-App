@@ -365,7 +365,7 @@ def _sort_key_datetime(value):
     dt = pd.to_datetime(value, errors="coerce")
     return (pd.isna(dt), dt if pd.notna(dt) else pd.Timestamp.max)
 
-images_on_page = []  # Stephen - collect (res, path) tuples for buttons outside form
+#images_on_page = []  # Stephen - collect (res, path) tuples for buttons outside form
 
 # ▒▒▒ bulk-edit form ▒▒▒  (only commits inline widgets if enabled)
 with st.form("bulk_overrides", clear_on_submit=False):
@@ -403,7 +403,7 @@ with st.form("bulk_overrides", clear_on_submit=False):
                     else:
                         # Stephen - Display image with caption - button will be outside form
                         st.image(path, width=THUMB_DISPLAY_W, caption=f"{res.file_name} (click button below to view full size)", output_format="JPEG")
-                        images_on_page.append((res, path))
+                        #images_on_page.append((res, path))
 
                 if show_inline and row is not None:
                     with col_edit:
@@ -431,32 +431,17 @@ with st.form("bulk_overrides", clear_on_submit=False):
         disabled=not show_inline
     )
 
-# Stephen - View Full Size (Optimized for large file counts)
-if images_on_page:
-    st.markdown("---")
-    st.subheader("🔍 View Full Size Images")
-    
-    # Use selectbox instead of buttons to avoid widget explosion
-    file_options = ["-- Select an image to view --"] + [res.file_name for res, _ in images_on_page]
-    selected_file = st.selectbox(
-        "Choose image to view full size:",
-        options=file_options,
-        key="viewer_selector"
-    )
-    
-    if selected_file != "-- Select an image to view --":
-        # Find the path for selected file
-        selected_path = None
-        for res, path in images_on_page:
-            if res.file_name == selected_file:
-                selected_path = path
-                break
-        
-        if selected_path and os.path.exists(selected_path):
-            st.image(selected_path, caption=selected_file, use_container_width=True)
-            if st.button("Close Viewer", key="close_viewer_inline"):
-                # Reset selector without rerun
-                st.session_state["viewer_selector"] = "-- Select an image to view --"
+# Stephen - View Full Size Moved
+# if images_on_page:
+#     st.markdown("---")
+#     st.subheader("🔍 View Full Size Images")
+#     cols = st.columns(min(4, len(images_on_page)))
+#     for idx, (res, path) in enumerate(images_on_page):
+#         with cols[idx % len(cols)]:
+#             if st.button(f"View {res.file_name}", key=f"view_btn_{res.file_name}"):
+#                 st.session_state["viewer_path"] = path
+#                 st.session_state["viewer_name"] = res.file_name
+#                 st.rerun()
 
 # Commit inline overrides (only for keys that exist) -------------------
 if save_all and show_inline:
