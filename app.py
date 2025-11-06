@@ -138,7 +138,9 @@ async def process_images_streaming_async(
         for batch_start in range(0, total, BATCH_SIZE):
             batch_end = min(batch_start + BATCH_SIZE, total)
             batch_files = uploaded_files[batch_start:batch_end]
-                        
+            
+            st.info(f"Processing batch {batch_start // BATCH_SIZE + 1} of {(total + BATCH_SIZE - 1) // BATCH_SIZE} (files {batch_start + 1}-{batch_end})")
+            
             for i, f in enumerate(batch_files, batch_start + 1):
                 data = None
                 try:
@@ -169,6 +171,7 @@ async def process_images_streaming_async(
             
             # Aggressive cleanup after each batch
             gc.collect()
+            st.success(f"Batch {batch_start // BATCH_SIZE + 1} complete. Cleaned up memory.")
 
     bar.empty()
     gc.collect()
@@ -321,6 +324,7 @@ if uploader:
         
         # Force garbage collection after processing
         gc.collect()
+        st.success(f"✅ Successfully processed {len(all_results)} images in {(len(all_results) + BATCH_SIZE - 1) // BATCH_SIZE} batches")
 
 # Guard: only proceed if results exist
 if "image_results" not in st.session_state or "edited_df" not in st.session_state:
@@ -365,7 +369,7 @@ def _sort_key_datetime(value):
     dt = pd.to_datetime(value, errors="coerce")
     return (pd.isna(dt), dt if pd.notna(dt) else pd.Timestamp.max)
 
-#images_on_page = []  # Stephen - collect (res, path) tuples for buttons outside form
+images_on_page = []  # Stephen - collect (res, path) tuples for buttons outside form
 
 # ▒▒▒ bulk-edit form ▒▒▒  (only commits inline widgets if enabled)
 with st.form("bulk_overrides", clear_on_submit=False):
@@ -403,7 +407,7 @@ with st.form("bulk_overrides", clear_on_submit=False):
                     else:
                         # Stephen - Display image with caption - button will be outside form
                         st.image(path, width=THUMB_DISPLAY_W, caption=f"{res.file_name} (click button below to view full size)", output_format="JPEG")
-                        #images_on_page.append((res, path))
+                        images_on_page.append((res, path))
 
                 if show_inline and row is not None:
                     with col_edit:
@@ -432,16 +436,16 @@ with st.form("bulk_overrides", clear_on_submit=False):
     )
 
 # Stephen - View Full Size Moved
-# if images_on_page:
-#     st.markdown("---")
-#     st.subheader("🔍 View Full Size Images")
-#     cols = st.columns(min(4, len(images_on_page)))
-#     for idx, (res, path) in enumerate(images_on_page):
-#         with cols[idx % len(cols)]:
-#             if st.button(f"View {res.file_name}", key=f"view_btn_{res.file_name}"):
-#                 st.session_state["viewer_path"] = path
-#                 st.session_state["viewer_name"] = res.file_name
-#                 st.rerun()
+if images_on_page:
+    st.markdown("---")
+    st.subheader("🔍 View Full Size Images")
+    cols = st.columns(min(4, len(images_on_page)))
+    for idx, (res, path) in enumerate(images_on_page):
+        with cols[idx % len(cols)]:
+            if st.button(f"View {res.file_name}", key=f"view_btn_{res.file_name}"):
+                st.session_state["viewer_path"] = path
+                st.session_state["viewer_name"] = res.file_name
+                st.rerun()
 
 # Commit inline overrides (only for keys that exist) -------------------
 if save_all and show_inline:
