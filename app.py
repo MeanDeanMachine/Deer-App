@@ -40,7 +40,7 @@ DIRECTIONS = ["", "N", "NE", "E", "SE", "S", "SW", "W", "NW"]  # "" = no entry
 THUMB_MAX = (512, 512)  # hard cap to keep memory down
 THUMB_QUAL = 75         # JPEG quality
 THUMB_DISPLAY_W = 800   # UI width; actual file is ≤512px so browser scales up
-BATCH_SIZE = 100         # Process files in batches to control memory usage
+BATCH_SIZE = 50         # Process files in batches to control memory usage
 
 # ──────────────────────────────────────────────────────────────────────
 # Data structures
