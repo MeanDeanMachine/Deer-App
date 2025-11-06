@@ -40,7 +40,7 @@ DIRECTIONS = ["", "N", "NE", "E", "SE", "S", "SW", "W", "NW"]  # "" = no entry
 THUMB_MAX = (512, 512)  # hard cap to keep memory down
 THUMB_QUAL = 75         # JPEG quality
 THUMB_DISPLAY_W = 800   # UI width; actual file is ≤512px so browser scales up
-BATCH_SIZE = 50         # Process files in batches to control memory usage
+BATCH_SIZE = 125         # Process files in batches to control memory usage
 
 # ──────────────────────────────────────────────────────────────────────
 # Data structures
@@ -138,9 +138,7 @@ async def process_images_streaming_async(
         for batch_start in range(0, total, BATCH_SIZE):
             batch_end = min(batch_start + BATCH_SIZE, total)
             batch_files = uploaded_files[batch_start:batch_end]
-            
-            st.info(f"Processing batch {batch_start // BATCH_SIZE + 1} of {(total + BATCH_SIZE - 1) // BATCH_SIZE} (files {batch_start + 1}-{batch_end})")
-            
+                        
             for i, f in enumerate(batch_files, batch_start + 1):
                 data = None
                 try:
@@ -171,7 +169,6 @@ async def process_images_streaming_async(
             
             # Aggressive cleanup after each batch
             gc.collect()
-            st.success(f"Batch {batch_start // BATCH_SIZE + 1} complete. Cleaned up memory.")
 
     bar.empty()
     gc.collect()
@@ -324,7 +321,6 @@ if uploader:
         
         # Force garbage collection after processing
         gc.collect()
-        st.success(f"✅ Successfully processed {len(all_results)} images in {(len(all_results) + BATCH_SIZE - 1) // BATCH_SIZE} batches")
 
 # Guard: only proceed if results exist
 if "image_results" not in st.session_state or "edited_df" not in st.session_state:
