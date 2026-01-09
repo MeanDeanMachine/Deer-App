@@ -40,7 +40,6 @@ DIRECTIONS = ["", "N", "NE", "E", "SE", "S", "SW", "W", "NW"]  # "" = no entry
 THUMB_MAX = (512, 512)  # hard cap to keep memory down
 THUMB_QUAL = 75         # JPEG quality
 THUMB_DISPLAY_W = 800   # UI width; actual file is ≤512px so browser scales up
-BATCH_SIZE = 10         # Process files in batches to control memory usage
 
 # ──────────────────────────────────────────────────────────────────────
 # Data structures
@@ -123,10 +122,10 @@ async def process_images_streaming_async(
     uploaded_files, rf_client: RoboflowClient, temp_dir: str
 ) -> List[ImageResult]:
     """
-    Batch-based memory-safe processing:
-    - Process files in batches of BATCH_SIZE
-    - Clear memory between batches
-    - Strictly one-by-one within each batch
+    Ultra-safe memory path: process files strictly one-by-one.
+    - no preloading a list of bytes
+    - no task list
+    - no concurrency
     """
     results: List[ImageResult] = []
     total = len(uploaded_files)
@@ -134,44 +133,33 @@ async def process_images_streaming_async(
 
     connector = aiohttp.TCPConnector(limit=1)  # enforce one socket at a time
     async with aiohttp.ClientSession(connector=connector) as session:
-        # Process in batches
-        for batch_start in range(0, total, BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE, total)
-            batch_files = uploaded_files[batch_start:batch_end]
-            
-            st.info(f"Processing batch {batch_start // BATCH_SIZE + 1} of {(total + BATCH_SIZE - 1) // BATCH_SIZE} (files {batch_start + 1}-{batch_end})")
-            
-            for i, f in enumerate(batch_files, batch_start + 1):
-                data = None
-                try:
-                    data = f.read()  # read only this file into memory
-                    res = await _process_single(session, rf_client, f.name, data, temp_dir)
-                    results.append(res)
-                except MemoryError:
-                    st.error(
-                        f"Out of memory while processing {f.name}. "
-                        "Try reducing BATCH_SIZE or processing fewer images."
+        for i, f in enumerate(uploaded_files, 1):
+            data = None
+            try:
+                data = f.read()  # read only this file into memory
+                res = await _process_single(session, rf_client, f.name, data, temp_dir)
+                results.append(res)
+            except MemoryError:
+                st.error(
+                    f"Out of memory while processing {f.name}. "
+                    "Try fewer images in one run."
+                )
+                raise
+            except Exception as e:
+                # Record a per-image error but keep going
+                results.append(
+                    ImageResult(
+                        file_name=f.name, date_time=None,
+                        buck_count=0, deer_count=0, doe_count=0,
+                        annotated_path="", target_buck=False, error=str(e)
                     )
-                    raise
-                except Exception as e:
-                    # Record a per-image error but keep going
-                    results.append(
-                        ImageResult(
-                            file_name=f.name, date_time=None,
-                            buck_count=0, deer_count=0, doe_count=0,
-                            annotated_path="", target_buck=False, error=str(e)
-                        )
-                    )
-                finally:
-                    if data is not None:
-                        del data
-                    if i % 5 == 0:
-                        gc.collect()
-                    bar.progress(i / total, text=f"{i}/{total} processed")
-            
-            # Aggressive cleanup after each batch
-            gc.collect()
-            st.success(f"Batch {batch_start // BATCH_SIZE + 1} complete. Cleaned up memory.")
+                )
+            finally:
+                if data is not None:
+                    del data
+                if i % 5 == 0:
+                    gc.collect()
+                bar.progress(i / total, text=f"{i}/{total} processed")
 
     bar.empty()
     gc.collect()
@@ -193,28 +181,10 @@ def to_dataframe(results: List[ImageResult]) -> pd.DataFrame:
                 doe_count=r.doe_count,
                 direction=r.direction,
                 target_buck=bool(r.target_buck),
-                annotated_path=r.annotated_path,  # Keep path in DataFrame
             )
             for r in results
         ]
     )
-
-
-def df_to_image_results(df: pd.DataFrame) -> List[ImageResult]:
-    """Rebuild ImageResult objects from DataFrame (memory-efficient on-demand conversion)."""
-    return [
-        ImageResult(
-            file_name=row.file_name,
-            date_time=row.date_time,
-            buck_count=row.buck_count,
-            deer_count=row.deer_count,
-            doe_count=row.doe_count,
-            annotated_path=row.annotated_path,
-            direction=row.direction if pd.notna(row.direction) else None,
-            target_buck=bool(row.target_buck) if pd.notna(row.target_buck) else False,
-        )
-        for _, row in df.iterrows()
-    ]
 
 
 def compute_summary(df: pd.DataFrame) -> Dict[str, int]:
@@ -226,7 +196,6 @@ def compute_summary(df: pd.DataFrame) -> Dict[str, int]:
     )
 
 
-@st.cache_data(show_spinner=False)
 def bucket_time(ts: pd.Timestamp | None) -> str | None:
     if pd.isna(ts):
         return None
@@ -264,36 +233,6 @@ def categorise(results: List[ImageResult], df_counts: pd.DataFrame) -> Dict[str,
         else:
             cat["Doe"].append(res)
     return cat
-
-
-@st.cache_data(show_spinner=False)
-def compute_heatmap_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], List]:
-    """Compute heatmap aggregation once and cache it (used by both Plotly and Matplotlib)."""
-    ts = pd.to_datetime(df["date_time"], errors="coerce")
-    heat_df = df.copy()
-    heat_df["date"] = ts.dt.date
-    heat_df["bucket"] = ts.apply(bucket_time)
-    
-    if "target_buck" not in heat_df.columns:
-        heat_df["target_buck"] = False
-    heat_df["target_buck"] = heat_df["target_buck"].fillna(False).astype(bool)
-    heat_df["tb_sightings"] = heat_df["target_buck"].astype(int)
-    
-    agg = (
-        heat_df.groupby(["bucket", "date"], as_index=False)
-        .agg(
-            buck=("buck_count", "sum"),
-            deer=("deer_count", "sum"),
-            doe=("doe_count", "sum"),
-            tb_sightings=("tb_sightings", "sum"),
-        )
-    )
-    agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
-    
-    buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
-    dates = sorted([d for d in agg["date"].unique() if pd.notna(d)])
-    
-    return agg, buckets, dates
 
 
 def cleanup_temp_dir():
@@ -364,39 +303,31 @@ if uploader:
             st.exception(e)
             st.stop()
 
-        # Cache only DataFrame for UI/editing (memory-optimized: no duplicate ImageResult list)
-        st.session_state["edited_df"] = to_dataframe(all_results)
+        # Cache results for UI / editing
+        st.session_state["image_results"] = all_results
+        st.session_state["orig_df"] = to_dataframe(all_results)
+        st.session_state["edited_df"] = st.session_state["orig_df"].copy()
         if "open_cat" not in st.session_state:
             st.session_state.open_cat = None
-        
-        # Clear all_results from memory immediately
-        num_processed = len(all_results)
-        del all_results
-        
-        # Force garbage collection after processing
-        gc.collect()
-        st.success(f"✅ Successfully processed {num_processed} images in {(num_processed + BATCH_SIZE - 1) // BATCH_SIZE} batches")
 
 # Guard: only proceed if results exist
-if "edited_df" not in st.session_state:
+if "image_results" not in st.session_state or "edited_df" not in st.session_state:
     st.info("Upload images and click **Process Images** to see results.")
     st.stop()
 
+results = st.session_state["image_results"]
+
 # Editable grid (primary editing surface) ------------------------------
 st.subheader("Review / correct counts (table editor)")
-# Hide annotated_path column from editor (internal use only)
-display_cols = [c for c in st.session_state["edited_df"].columns if c != "annotated_path"]
 edited = st.data_editor(
-    st.session_state["edited_df"][display_cols],
+    st.session_state["edited_df"],
     disabled=["file_name", "date_time"],
     key="editor",
     num_rows="fixed",
     use_container_width=True,
 )
 if st.button("Apply overrides from table", key="apply_table"):
-    # Merge edited columns back, preserving annotated_path
-    for col in edited.columns:
-        st.session_state["edited_df"][col] = edited[col]
+    st.session_state["edited_df"] = edited
 
 # KPI/Charts/Downloads containers
 kpi_container = st.container()
@@ -410,19 +341,13 @@ if "open_cat" not in st.session_state:
 # Gallery controls -----------------------------------------------------
 st.header("Annotated Images")
 
-# Images per page = total across categories; we'll show ~¼ per category
-PAGE_SIZE = st.selectbox("Images per page (total, across all categories)", [12, 24, 48], index=0)  # Default to 12 for memory
+# Images per page = total across categories; we’ll show ~¼ per category
+PAGE_SIZE = st.selectbox("Images per page (total, across all categories)", [12, 24, 48], index=1)
 PER_CAT = max(1, PAGE_SIZE // 4)
 page = st.number_input("Page", min_value=1, value=1, step=1)
 show_inline = st.checkbox("Enable per-image inline overrides (slower)", value=False)
 
-# Rebuild ImageResult objects on-demand from DataFrame (memory-efficient)
-results = df_to_image_results(st.session_state["edited_df"])
 cats = categorise(results, st.session_state["edited_df"])
-
-# Clear results after categorization to free memory
-del results
-gc.collect()
 
 def _sort_key_datetime(value):
     dt = pd.to_datetime(value, errors="coerce")
@@ -494,32 +419,17 @@ with st.form("bulk_overrides", clear_on_submit=False):
         disabled=not show_inline
     )
 
-# Stephen - View Full Size (Optimized for large file counts)
-# if images_on_page:
-#     st.markdown("---")
-#     st.subheader("🔍 View Full Size Images")
-    
-#     # Use selectbox instead of buttons to avoid widget explosion
-#     file_options = ["-- Select an image to view --"] + [res.file_name for res, _ in images_on_page]
-#     selected_file = st.selectbox(
-#         "Choose image to view full size:",
-#         options=file_options,
-#         key="viewer_selector"
-#     )
-    
-#     if selected_file != "-- Select an image to view --":
-#         # Find the path for selected file
-#         selected_path = None
-#         for res, path in images_on_page:
-#             if res.file_name == selected_file:
-#                 selected_path = path
-#                 break
-        
-#         if selected_path and os.path.exists(selected_path):
-#             st.image(selected_path, caption=selected_file, use_container_width=True)
-#             if st.button("Close Viewer", key="close_viewer_inline"):
-#                 # Reset selector without rerun
-#                 st.session_state["viewer_selector"] = "-- Select an image to view --"
+# Stephen - View Full Size Moved
+if images_on_page:
+    st.markdown("---")
+    st.subheader("🔍 View Full Size Images")
+    cols = st.columns(min(4, len(images_on_page)))
+    for idx, (res, path) in enumerate(images_on_page):
+        with cols[idx % len(cols)]:
+            if st.button(f"View {res.file_name}", key=f"view_btn_{res.file_name}"):
+                st.session_state["viewer_path"] = path
+                st.session_state["viewer_name"] = res.file_name
+                st.rerun()
 
 # Commit inline overrides (only for keys that exist) -------------------
 if save_all and show_inline:
@@ -584,8 +494,29 @@ with charts_container:
 
     # heat-map + overlays (green = bucks, red = target-buck sightings)
     if df_final["date_time"].notna().any():
-        # Use cached heatmap data computation
-        agg, buckets, dates = compute_heatmap_data(df_final)
+        ts = pd.to_datetime(df_final["date_time"], errors="coerce")
+        heat_df = df_final.copy()
+        heat_df["date"]   = ts.dt.date
+        heat_df["bucket"] = ts.apply(bucket_time)
+
+        if "target_buck" not in heat_df.columns:
+            heat_df["target_buck"] = False
+        heat_df["target_buck"] = heat_df["target_buck"].fillna(False).astype(bool)
+        heat_df["tb_sightings"] = heat_df["target_buck"].astype(int)
+
+        agg = (
+            heat_df.groupby(["bucket", "date"], as_index=False)
+            .agg(
+                buck=("buck_count", "sum"),
+                deer=("deer_count", "sum"),
+                doe=("doe_count", "sum"),
+                tb_sightings=("tb_sightings", "sum"),
+            )
+        )
+        agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
+
+        buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
+        dates   = sorted([d for d in agg["date"].unique() if pd.notna(d)])
 
         bucket_labels = {
             "Dawn":      "Dawn (6:00–8:00 am)",
@@ -597,14 +528,14 @@ with charts_container:
         }
 
         # Heat matrix
-        z = [[int(agg[(agg["bucket"] == bucket) & (agg["date"] == date)]["activity"].sum() or 0)
-              for date in dates] for bucket in buckets]
+        z = [[int(agg.query("bucket==@b and date==@d")["activity"].sum() or 0)
+              for d in dates] for b in buckets]
 
         # GREEN bubbles = total buck count
         sx, sy, ss, sc = [], [], [], []
         for b in buckets:
             for d in dates:
-                bk = int(agg[(agg["bucket"] == b) & (agg["date"] == d)]["buck"].sum() or 0)
+                bk = int(agg.query("bucket==@b and date==@d")["buck"].sum() or 0)
                 if bk:
                     sx.append(d); sy.append(b); ss.append(bk * 10 + 8); sc.append(bk)
 
@@ -612,7 +543,7 @@ with charts_container:
         rsx, rsy, rss, rsc = [], [], [], []
         for b in buckets:
             for d in dates:
-                tb = int(agg[(agg["bucket"] == b) & (agg["date"] == d)]["tb_sightings"].sum() or 0)
+                tb = int(agg.query("bucket==@b and date==@d")["tb_sightings"].sum() or 0)
                 if tb:
                     rsx.append(d); rsy.append(b); rss.append(tb * 8 + 6); rsc.append(tb)
 
@@ -694,14 +625,35 @@ with download_container:
             pts = px * (72.0 / dpi)
             return pts * pts
 
-        # Reuse cached heatmap data computation
-        agg, buckets, dates = compute_heatmap_data(df_final)
+        ts = pd.to_datetime(df_final["date_time"], errors="coerce")
+        heat_df = df_final.copy()
+        heat_df["date"]   = ts.dt.date
+        heat_df["bucket"] = ts.apply(bucket_time)
+
+        if "target_buck" not in heat_df.columns:
+            heat_df["target_buck"] = False
+        heat_df["target_buck"]  = heat_df["target_buck"].fillna(False).astype(bool)
+        heat_df["tb_sightings"] = heat_df["target_buck"].astype(int)
+
+        agg = (
+            heat_df.groupby(["bucket", "date"], as_index=False)
+            .agg(
+                buck=("buck_count", "sum"),
+                deer=("deer_count", "sum"),
+                doe=("doe_count", "sum"),
+                tb_sightings=("tb_sightings", "sum"),
+            )
+        )
+        agg["activity"] = agg["buck"] + agg["deer"] + agg["doe"]
+
+        buckets = ["Dawn", "Morning", "Midday", "Afternoon", "Evening", "Night"]
+        dates   = sorted([d for d in agg["date"].unique() if pd.notna(d)])
 
         z = np.array(
             [
-                [int(agg[(agg["bucket"] == bucket) & (agg["date"] == date)]["activity"].sum() or 0)
-                 for date in dates]
-                for bucket in buckets
+                [int(agg.query("bucket==@b and date==@d")["activity"].sum() or 0)
+                 for d in dates]
+                for b in buckets
             ],
             dtype=float,
         )
@@ -710,8 +662,8 @@ with download_container:
         rx, ry, rs = [], [], []
         for bi, b in enumerate(buckets):
             for di, d in enumerate(dates):
-                bk = int(agg[(agg["bucket"] == b) & (agg["date"] == d)]["buck"].sum() or 0)
-                tb = int(agg[(agg["bucket"] == b) & (agg["date"] == d)]["tb_sightings"].sum() or 0)
+                bk = int(agg.query("bucket==@b and date==@d")["buck"].sum() or 0)
+                tb = int(agg.query("bucket==@b and date==@d")["tb_sightings"].sum() or 0)
                 if bk:
                     size_px = GREEN_K * bk + GREEN_B
                     gx.append(di); gy.append(bi); gs.append(px_to_mpl_area(size_px, DPI))
